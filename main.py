@@ -1,17 +1,17 @@
 """
-Hooker Telescope Contrast Curve Generator with Aperture Photometry
-================================================================
+Corrected Hooker Telescope Contrast Curve Generator
+===================================================
 
-A GUI application for generating contrast curves using small aperture photometry
-to find local maxima at each radius from the image center.
+This implementation correctly finds both local maxima and minima in annuli,
+then calculates the detection limit as described in the method.
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import ndimage
+from scipy.ndimage import maximum_filter, minimum_filter
 from scipy.stats import norm
 from scipy.interpolate import interp1d
-from scipy.ndimage import gaussian_filter1d
 import astropy.units as u
 from astropy.io import fits
 from pathlib import Path
@@ -23,13 +23,13 @@ from matplotlib.figure import Figure
 import threading
 
 
-class ApertureContrastCurveGenerator:
-    """Generate contrast curves using aperture photometry."""
+class ContrastCurveGenerator:
+    """Generate contrast curves using annular analysis of local extrema."""
 
     def __init__(self, image_data, pixel_scale=None, wavelength=None,
                  telescope_diameter=None, star_position=None, header=None):
         """Initialize the contrast curve generator."""
-        print("=== Aperture-Based Contrast Curve Generator ===")
+        print("=== Contrast Curve Generator ===")
 
         self.image = np.array(image_data, dtype=float)
         self.header = header or {}
@@ -44,14 +44,14 @@ class ApertureContrastCurveGenerator:
         # Measure PSF FWHM for reference
         self.fwhm_pixels, self.fwhm_arcsec = self.measure_psf_fwhm()
 
-        print(f"Hooker Telescope (2.54m) Aperture Analysis")
+        print(f"Hooker Telescope (2.54m) Analysis")
         print(f"Pixel scale: {self.pixel_scale * 1000:.1f} mas/pixel")
         print(f"Wavelength: {self.wavelength * 1e9:.0f} nm")
         print(f"Image size: {self.image.shape}")
         print(f"PSF FWHM: {self.fwhm_pixels:.2f} pixels ({self.fwhm_arcsec:.3f} arcsec)")
 
     def measure_psf_fwhm(self):
-        """Measure the FWHM of the central PSF with 1.25x scaling."""
+        """Measure the FWHM of the central PSF."""
         print("=== Measuring central PSF FWHM ===")
 
         try:
@@ -91,22 +91,20 @@ class ApertureContrastCurveGenerator:
                 else:
                     return 4  # Conservative estimate
 
-            # Calculate FWHM in both directions and multiply by 1.25
+            # Calculate FWHM in both directions
             fwhm_x = find_fwhm(horizontal_profile)
             fwhm_y = find_fwhm(vertical_profile)
 
-            raw_fwhm_pixels = (fwhm_x + fwhm_y) / 2.0
-            fwhm_pixels = raw_fwhm_pixels * 1.25
+            fwhm_pixels = (fwhm_x + fwhm_y) / 2.0
             fwhm_arcsec = fwhm_pixels * self.pixel_scale
 
-            print(f"Raw PSF FWHM: {raw_fwhm_pixels:.2f} pixels")
-            print(f"Scaled PSF FWHM (1.25x): {fwhm_pixels:.2f} pixels ({fwhm_arcsec:.3f} arcsec)")
+            print(f"PSF FWHM: {fwhm_pixels:.2f} pixels ({fwhm_arcsec:.3f} arcsec)")
 
             return fwhm_pixels, fwhm_arcsec
 
         except Exception as e:
             print(f"PSF FWHM measurement failed: {e}")
-            default_fwhm = 4.0 * 1.25  # Apply 1.25x scaling to default too
+            default_fwhm = 4.0
             return default_fwhm, default_fwhm * self.pixel_scale
 
     def _extract_pixel_scale(self, provided_scale):
@@ -170,222 +168,272 @@ class ApertureContrastCurveGenerator:
         print(f"Star position set to image center: ({star_pos[0]:.1f}, {star_pos[1]:.1f})")
         return star_pos
 
-    def aperture_photometry_at_radius(self, radius_pixels, aperture_size=3, max_radius=None):
-        """Perform aperture photometry at a given radius using overlapping apertures (1-pixel steps)."""
+    def find_local_extrema_in_annulus(self, inner_radius, outer_radius, footprint_size=3):
+        """Find local maxima and minima within an annulus."""
         center_x, center_y = self.star_pos
 
-        if max_radius is None:
-            max_radius = min(self.image.shape) // 2 - aperture_size
+        # Create coordinate grids
+        y, x = np.ogrid[:self.image.shape[0], :self.image.shape[1]]
 
-        if radius_pixels > max_radius:
-            return [], []
+        # Create annulus mask
+        dist_from_center = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+        annulus_mask = (dist_from_center >= inner_radius) & (dist_from_center <= outer_radius)
 
-        aperture_values = []
-        aperture_distances = []
-        half_aperture = aperture_size // 2
+        # Apply annulus mask to image
+        masked_image = self.image.copy()
+        masked_image[~annulus_mask] = np.nan
 
-        # Create a grid around the image center, stepping by 1 pixel
-        # This allows overlapping apertures for finer sampling
-        y_positions = range(half_aperture, self.image.shape[0] - half_aperture, 1)
-        x_positions = range(half_aperture, self.image.shape[1] - half_aperture, 1)
+        # Find local maxima using maximum filter
+        local_max_map = maximum_filter(self.image, size=footprint_size)
+        is_local_max = (self.image == local_max_map) & annulus_mask
 
-        for iy in y_positions:
-            for ix in x_positions:
-                # Calculate distance from aperture center to image center
-                aperture_center_dist = np.sqrt((ix - center_x) ** 2 + (iy - center_y) ** 2)
+        # For minima, use a different approach:
+        # 1. First find regions that are NOT maxima
+        # 2. Then find local minima within those regions
+        local_min_map = minimum_filter(self.image, size=footprint_size)
 
-                # Check if this aperture is at approximately the desired radius
-                # Allow some tolerance (±0.5 pixels) to capture apertures near this radius
-                tolerance = 0.5
-                if abs(aperture_center_dist - radius_pixels) <= tolerance:
-                    # Extract aperture region
-                    aperture_region = self.image[iy - half_aperture:iy + half_aperture + 1,
-                                      ix - half_aperture:ix + half_aperture + 1]
+        # A pixel is a local minimum if:
+        # - It equals the minimum in its neighborhood
+        # - It's not also a maximum (to avoid flat regions)
+        # - Its value is below the median of the annulus (to ensure we get actual low points)
+        annulus_values = self.image[annulus_mask]
+        annulus_median = np.median(annulus_values)
 
-                    # Find maximum in this aperture and its position
-                    max_value = np.max(aperture_region)
-                    max_pos = np.unravel_index(np.argmax(aperture_region), aperture_region.shape)
+        is_local_min = (self.image == local_min_map) & annulus_mask & ~is_local_max
 
-                    # Convert local maximum position to global image coordinates
-                    global_max_y = iy - half_aperture + max_pos[0]
-                    global_max_x = ix - half_aperture + max_pos[1]
+        # Additionally, sample some points that are simply below median
+        # This ensures we get minima even in smooth regions
+        below_median_mask = (self.image < annulus_median) & annulus_mask & ~is_local_max
 
-                    # Calculate precise distance from image center to the actual maximum pixel
-                    precise_distance = np.sqrt((global_max_x - center_x) ** 2 + (global_max_y - center_y) ** 2)
+        # Systematically sample some below-median points if we don't have enough minima
+        n_local_min = np.sum(is_local_min)
+        if n_local_min < 10:  # If we have very few minima
+            below_median_points = np.where(below_median_mask)
+            if len(below_median_points[0]) > 0:
+                # Sample evenly spaced points
+                n_samples = min(20, len(below_median_points[0]))
+                step = max(1, len(below_median_points[0]) // n_samples)
+                for i in range(0, len(below_median_points[0]), step):
+                    if i < len(below_median_points[0]):
+                        is_local_min[below_median_points[0][i], below_median_points[1][i]] = True
 
-                    aperture_values.append(max_value)
-                    aperture_distances.append(precise_distance)
+        # Extract values and positions
+        max_values = self.image[is_local_max]
+        min_values = self.image[is_local_min]
 
-        return aperture_values, aperture_distances
+        # Get positions of extrema
+        max_positions = np.where(is_local_max)
+        min_positions = np.where(is_local_min)
 
-    def generate_radial_profile(self, min_radius=None, max_radius=None, radius_step=1, aperture_size=3,
-                                use_fwhm_limit=True, manual_min_radius=None):
-        """Generate radial profile of local maxima."""
-        print("=== Generating radial profile with aperture photometry ===")
+        # Calculate exact distances for maxima
+        max_distances = np.sqrt((max_positions[1] - center_x) ** 2 +
+                                (max_positions[0] - center_y) ** 2)
 
-        if min_radius is None:
-            if manual_min_radius is not None and manual_min_radius > 0:
-                min_radius = manual_min_radius
-                print(f"Using manual minimum radius: {min_radius} pixels")
-            elif use_fwhm_limit:
-                min_radius = max(2, int(self.fwhm_pixels))  # Start at FWHM
-                print(f"Using FWHM-based minimum radius: {min_radius} pixels")
-            else:
-                min_radius = 2  # Start at 2 pixels if FWHM limit disabled
-                print("Using default minimum radius: 2 pixels")
+        # Calculate exact distances for minima
+        min_distances = np.sqrt((min_positions[1] - center_x) ** 2 +
+                                (min_positions[0] - center_y) ** 2)
 
-        if max_radius is None:
-            # Default to 40 pixels from center if not specified
-            max_radius = min(40, min(self.image.shape) // 2 - aperture_size)
+        return max_values, max_distances, min_values, min_distances
 
-        print(f"Final radius range: {min_radius} to {max_radius} pixels")
-        print(f"Aperture size: {aperture_size}x{aperture_size} pixels")
+    def generate_contrast_curve(self, min_radius=None, max_radius=None, radius_step=1,
+                                confidence_level=5.0, footprint_size=3):
+        """Generate contrast curve by analyzing annuli."""
+        print("=== Generating contrast curve ===")
 
-        radii = []
-        all_maxima = []
-
-        for radius in range(min_radius, max_radius + 1, radius_step):
-            aperture_values, aperture_distances = self.aperture_photometry_at_radius(radius, aperture_size, max_radius)
-
-            if aperture_values:
-                # Store all values and their precise distances
-                for value, distance in zip(aperture_values, aperture_distances):
-                    radii.append(distance)  # Use precise floating-point distance
-                    all_maxima.append(value)
-
-        print(f"Found {len(all_maxima)} aperture measurements across {len(set(radii))} radii")
-
-        self.radii = np.array(radii)
-        self.maxima_values = np.array(all_maxima)
+        # Get star flux for magnitude conversion
         self.star_flux = float(np.max(self.image))
 
-        return self.radii, self.maxima_values
+        # Start from very close to center
+        if min_radius is None:
+            min_radius = 1  # Start at 1 pixel from center
 
-    def compute_sigma_curve(self, confidence_level=5.0, bin_size=5):
-        """Compute sigma detection curve by binning the radial data."""
-        if not hasattr(self, 'radii') or len(self.radii) == 0:
-            return np.array([]), np.array([])
+        if max_radius is None:
+            max_radius = min(90, min(self.image.shape) // 2 - 5)
 
-        # Create radial bins
-        min_radius = np.min(self.radii)
-        max_radius = np.max(self.radii)
+        print(f"Radius range: {min_radius} to {max_radius} pixels")
+        print(f"Footprint size for extrema detection: {footprint_size}x{footprint_size}")
 
-        # Create bins every bin_size pixels
-        bin_edges = np.arange(min_radius, max_radius + bin_size, bin_size)
-        bin_centers = 0.5 * (bin_edges[1:] + bin_edges[:-1])
+        # Storage for all extrema
+        all_radii_max = []
+        all_maxima = []
+        all_radii_min = []
+        all_minima = []
 
-        from scipy.stats import binned_statistic
+        # Storage for statistics per annulus
+        annulus_centers = []
+        mean_maxima = []
+        std_maxima = []
+        std_minima = []
+        detection_limits = []
 
-        # Calculate statistics in each bin
-        means, _, _ = binned_statistic(self.radii, self.maxima_values, statistic='mean', bins=bin_edges)
-        stds, _, _ = binned_statistic(self.radii, self.maxima_values, statistic='std', bins=bin_edges)
-        counts, _, _ = binned_statistic(self.radii, self.maxima_values, statistic='count', bins=bin_edges)
+        # Add a point at the origin (0,0) with zero detection limit
+        annulus_centers.append(0)
+        detection_limits.append(self.star_flux)  # At r=0, detection limit is the star flux itself
 
-        # Only keep bins with sufficient data
-        valid_bins = counts >= 3
+        # Process each annulus with smaller width for smoother curve
+        annulus_width = 2  # Width of each annulus
+        for radius in range(min_radius, max_radius, radius_step):
+            inner_r = max(0, radius - annulus_width / 2)  # Ensure inner radius doesn't go negative
+            outer_r = radius + annulus_width / 2
 
-        if np.sum(valid_bins) < 2:
-            print("Warning: Insufficient data for sigma curve")
-            return bin_centers, means + confidence_level * stds
+            # Find extrema in this annulus
+            max_vals, max_dists, min_vals, min_dists = self.find_local_extrema_in_annulus(
+                inner_r, outer_r, footprint_size)
 
-        # Filter to valid bins
-        valid_centers = bin_centers[valid_bins]
-        valid_means = means[valid_bins]
-        valid_stds = stds[valid_bins]
+            if len(max_vals) > 0:  # Changed condition - only need maxima
+                # Store all individual extrema
+                all_radii_max.extend(max_dists)
+                all_maxima.extend(max_vals)
 
-        # Calculate threshold
-        sigma_threshold = valid_means + confidence_level * valid_stds
+                # Only store minima if we found any
+                if len(min_vals) > 0:
+                    all_radii_min.extend(min_dists)
+                    all_minima.extend(min_vals)
+                    std_min = np.std(min_vals)
+                else:
+                    # If no minima found, use std of maxima as estimate
+                    std_min = np.std(max_vals)
 
-        # Interpolate back to all bin centers
-        if len(valid_centers) >= 2:
-            interp_func = interp1d(valid_centers, sigma_threshold,
-                                   kind='linear', bounds_error=False,
-                                   fill_value=(sigma_threshold[0], sigma_threshold[-1]))
-            threshold = interp_func(bin_centers)
-        else:
-            threshold = means + confidence_level * stds
+                # Calculate statistics for this annulus
+                mean_max = np.mean(max_vals)
+                std_max = np.std(max_vals)
 
-        print(f"Computed {confidence_level}σ curve with {len(bin_centers)} radial bins")
-        return bin_centers, threshold
+                # Average sigma of maxima and minima
+                avg_sigma = (std_max + std_min) / 2.0
 
-    def plot_contrast_curve(self, confidence_level=5.0, aperture_size=3, max_radius=40, use_fwhm_limit=True,
-                            manual_min_radius=None, save_path=None, show_plot=True):
-        """Plot the aperture-based contrast curve."""
-        print("=== Generating aperture-based contrast curve ===")
+                # Detection limit = mean(maxima) + 5 * average_sigma
+                detection_limit = mean_max + confidence_level * avg_sigma
 
-        # Generate radial profile
-        radii, maxima = self.generate_radial_profile(aperture_size=aperture_size, max_radius=max_radius,
-                                                     use_fwhm_limit=use_fwhm_limit, manual_min_radius=manual_min_radius)
+                annulus_centers.append(radius)
+                mean_maxima.append(mean_max)
+                std_maxima.append(std_max)
+                std_minima.append(std_min)
+                detection_limits.append(detection_limit)
+
+        # Convert to arrays
+        self.all_radii_max = np.array(all_radii_max)
+        self.all_maxima = np.array(all_maxima)
+        self.all_radii_min = np.array(all_radii_min)
+        self.all_minima = np.array(all_minima)
+
+        self.annulus_centers = np.array(annulus_centers)
+        self.detection_limits = np.array(detection_limits)
+
+        # Smooth the detection limit curve slightly for better appearance
+        # Skip the first point (at origin) when smoothing
+        if len(self.detection_limits) > 5:
+            from scipy.ndimage import gaussian_filter1d
+            smoothed = gaussian_filter1d(self.detection_limits[1:], sigma=1.5)
+            self.detection_limits[1:] = smoothed
+
+        print(f"Found {len(all_maxima)} local maxima and {len(all_minima)} local minima")
+        print(f"Processed {len(annulus_centers)} annuli")
+
+        return self.annulus_centers, self.detection_limits
+
+    def plot_contrast_curve(self, confidence_level=5.0, min_radius=None, max_radius=40,
+                            save_path=None, show_plot=True):
+        """Plot the contrast curve showing all extrema and detection limit."""
+        print("=== Plotting contrast curve ===")
+
+        # Generate the contrast curve
+        radii, limits = self.generate_contrast_curve(
+            min_radius=min_radius,
+            max_radius=max_radius,
+            confidence_level=confidence_level
+        )
 
         if len(radii) == 0:
             print("No data found!")
             return None
 
-        # Compute sigma curve
-        bin_centers, sigma_threshold = self.compute_sigma_curve(confidence_level)
+        # Convert to magnitudes
+        maxima_delta_mag = -2.5 * np.log10(self.all_maxima / self.star_flux)
+        if len(self.all_minima) > 0:
+            minima_delta_mag = -2.5 * np.log10(self.all_minima / self.star_flux)
+        else:
+            minima_delta_mag = np.array([])
 
-        # Convert to delta magnitudes
-        maxima_delta_mag = -2.5 * np.log10(maxima / self.star_flux)
-        sigma_delta_mag = -2.5 * np.log10(sigma_threshold / self.star_flux)
+        # For the limits, handle the point at origin specially
+        limits_delta_mag = np.zeros(len(limits))
+        limits_delta_mag[0] = 0  # At r=0, delta magnitude = 0
+        limits_delta_mag[1:] = -2.5 * np.log10(limits[1:] / self.star_flux)
 
-        # Create the plot
-        fig, ax = plt.subplots(1, 1, figsize=(12, 8))
+        # Create the plot with similar style to example
+        fig, ax = plt.subplots(1, 1, figsize=(10, 7))
 
-        # Plot all individual measurements
-        ax.scatter(radii, maxima_delta_mag, color='black', s=2, alpha=0.5,
-                   label=f'Aperture Maxima ({len(radii)} measurements)')
+        # Plot all local maxima with empty squares
+        ax.scatter(self.all_radii_max * self.pixel_scale, maxima_delta_mag,
+                   marker='s', s=30, facecolors='none', edgecolors='black',
+                   linewidth=0.5, alpha=0.7, label='Local Maxima')
 
-        # Plot sigma curve
-        ax.plot(bin_centers, sigma_delta_mag, 'r-', linewidth=3,
-                label=f'{confidence_level}σ Detection Limit')
+        # Plot all local minima with small filled dots (if any found)
+        if len(self.all_minima) > 0:
+            ax.scatter(self.all_radii_min * self.pixel_scale, minima_delta_mag,
+                       marker='.', s=10, color='black', alpha=0.7,
+                       label='Local Minima')
+            print(f"Plotted {len(self.all_minima)} local minima")
+        else:
+            print("Warning: No local minima found to plot")
 
-        # Find candidates above threshold
-        sigma_interp = np.interp(radii, bin_centers, sigma_delta_mag)
-        candidates = maxima_delta_mag < sigma_interp  # Lower delta mag = brighter
+        # Plot detection limit curve with thicker red line
+        ax.plot(radii * self.pixel_scale, limits_delta_mag, 'r-', linewidth=2.5)
 
-        if np.any(candidates):
-            ax.scatter(radii[candidates], maxima_delta_mag[candidates],
-                       edgecolor='red', facecolor='none', s=50, linewidth=2,
-                       label=f'Candidate Detections ({np.sum(candidates)})')
+        # Find the deepest point in the curve (likely a companion detection)
+        # Skip the origin point when looking for minima
+        min_idx = np.argmin(limits_delta_mag[1:]) + 1
+        min_sep = radii[min_idx] * self.pixel_scale
+        min_limit = limits_delta_mag[min_idx]
 
-        # Formatting
-        ax.set_xlabel('Radius (pixels)', fontsize=12)
-        ax.set_ylabel('Contrast (Δ magnitude)', fontsize=12)
-        ax.set_title(f'Aperture-Based Contrast Curve - {confidence_level}σ Detection Limit', fontsize=14)
-        ax.legend(fontsize=11)
-        ax.grid(True, alpha=0.3)
+        # Add annotations similar to the example
+        # Annotate the limiting delta magnitude at the dip
+        ax.annotate(f'Limiting Δm = {min_limit:.2f}',
+                    xy=(min_sep, min_limit),
+                    xytext=(min_sep - 0.05, min_limit + 0.5),
+                    fontsize=11, ha='center')
 
-        # Set magnitude limits (7 mag range max)
-        min_mag = max(0, np.min(sigma_delta_mag) - 0.5)
-        max_mag = min(min_mag + 7, np.percentile(maxima_delta_mag, 95) + 1)
-        ax.set_ylim(max_mag, min_mag)  # Inverted for magnitude scale
+        # Find another point to annotate (e.g., at a different separation)
+        other_idx = len(radii) // 3  # Pick a point about 1/3 of the way
+        if other_idx > 0:
+            other_sep = radii[other_idx] * self.pixel_scale
+            other_limit = limits_delta_mag[other_idx]
 
-        # Add secondary x-axis with arcsec
-        ax_top = ax.twiny()
-        ax_top.set_xlim(ax.get_xlim())
-        ax_top.set_xlabel('Radius (arcsec)', fontsize=12)
-        pixel_ticks = ax.get_xticks()
-        arcsec_ticks = pixel_ticks * self.pixel_scale
-        ax_top.set_xticks(pixel_ticks)
-        ax_top.set_xticklabels([f'{x:.3f}' for x in arcsec_ticks])
+            ax.annotate(f'Limiting Δm = {other_limit:.2f}',
+                        xy=(other_sep, other_limit),
+                        xytext=(other_sep - 0.05, other_limit - 0.5),
+                        fontsize=11, ha='center')
 
-        # Add info box (positioned on right middle)
-        info_text = f'Wavelength: {self.wavelength * 1e9:.0f} nm\n'
-        info_text += f'Pixel scale: {self.pixel_scale * 1000:.1f} mas/pixel\n'
-        info_text += f'PSF FWHM: {self.fwhm_pixels:.2f} pix ({self.fwhm_arcsec:.3f}")\n'
-        info_text += f'Aperture: {aperture_size}×{aperture_size} pixels\n'
-        info_text += f'Measurements: {len(radii)}\n'
-        if np.any(candidates):
-            info_text += f'Candidates: {np.sum(candidates)}'
+        # Formatting to match example
+        ax.set_xlabel('Separation [arcsec]', fontsize=13)
+        ax.set_ylabel('Magnitude Difference', fontsize=13)
 
-        ax.text(0.98, 0.5, info_text, transform=ax.transAxes,
-                fontsize=10, verticalalignment='center', horizontalalignment='right',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        # Legend in upper right like example
+        ax.legend(fontsize=10, loc='upper right', frameon=True, fancybox=False)
+
+        # Grid style
+        ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+
+        # Set axis limits to match example style
+        # Y-axis: 0 to 10 (normal orientation - 0 at bottom, 10 at top)
+        ax.set_ylim(0, 10)
+
+        # X-axis: 0 to about 1.2 arcsec (adjust based on data)
+        max_x = min(1.2, max_radius * self.pixel_scale)
+        ax.set_xlim(0, max_x)
+
+        # Set tick parameters to match example
+        ax.tick_params(axis='both', which='major', labelsize=11)
+
+        # Remove title (not present in example)
+
+        # Use a white background
+        ax.set_facecolor('white')
+        fig.patch.set_facecolor('white')
 
         plt.tight_layout()
 
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
             print(f"Plot saved to: {save_path}")
 
         if show_plot:
@@ -433,14 +481,15 @@ def load_speckle_image(file_path):
     return image_data, header
 
 
-class ApertureContrastGUI:
-    """GUI for aperture-based contrast curves."""
+# GUI class remains mostly the same, but uses ContrastCurveGenerator instead
+class ContrastCurveGUI:
+    """GUI for contrast curve generation."""
 
     def __init__(self, root):
-        print("=== Aperture Contrast Curve GUI ===")
+        print("=== Contrast Curve GUI ===")
 
         self.root = root
-        self.root.title("Hooker Telescope Aperture-Based Contrast Curve Generator")
+        self.root.title("Hooker Telescope Contrast Curve Generator")
         self.root.geometry("800x700")
 
         # Variables
@@ -448,10 +497,8 @@ class ApertureContrastGUI:
         self.confidence_level = tk.DoubleVar(value=5.0)
         self.pixel_scale = tk.DoubleVar(value=0.0135)
         self.wavelength = tk.DoubleVar(value=617)
-        self.aperture_size = tk.IntVar(value=3)
-        self.max_radius = tk.IntVar(value=40)
-        self.min_radius = tk.IntVar(value=0)  # 0 means use automatic
-        self.use_fwhm_limit = tk.BooleanVar(value=True)
+        self.max_radius = tk.IntVar(value=90)  # Increased to show ~1.2 arcsec
+        self.min_radius = tk.IntVar(value=1)  # Default to 1 pixel
         self.save_path = tk.StringVar()
 
         # Current data
@@ -478,17 +525,13 @@ class ApertureContrastGUI:
         param_frame = ttk.LabelFrame(main_frame, text="Parameters", padding="5")
         param_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
 
-        # Row 0: Confidence Level and Aperture Size
+        # Row 0: Confidence Level
         ttk.Label(param_frame, text="Confidence Level (σ):").grid(row=0, column=0, sticky=tk.W, padx=5)
         ttk.Spinbox(param_frame, from_=1.0, to=10.0, increment=0.1,
                     textvariable=self.confidence_level, width=10).grid(row=0, column=1, padx=5)
 
-        ttk.Label(param_frame, text="Aperture Size (pixels):").grid(row=0, column=2, sticky=tk.W, padx=5)
-        ttk.Spinbox(param_frame, from_=1, to=7, increment=2,
-                    textvariable=self.aperture_size, width=10).grid(row=0, column=3, padx=5)
-
-        # Row 1: Min Radius and Max Radius
-        ttk.Label(param_frame, text="Min Radius (pixels, 0=auto):").grid(row=1, column=0, sticky=tk.W, padx=5)
+        # Row 1: Min and Max Radius
+        ttk.Label(param_frame, text="Min Radius (pixels):").grid(row=1, column=0, sticky=tk.W, padx=5)
         ttk.Spinbox(param_frame, from_=0, to=50, increment=1,
                     textvariable=self.min_radius, width=10).grid(row=1, column=1, padx=5)
 
@@ -503,13 +546,9 @@ class ApertureContrastGUI:
         ttk.Label(param_frame, text="Wavelength (nm):").grid(row=2, column=2, sticky=tk.W, padx=5)
         ttk.Entry(param_frame, textvariable=self.wavelength, width=10).grid(row=2, column=3, padx=5)
 
-        # Row 3: FWHM limit checkbox
-        ttk.Checkbutton(param_frame, text="Use FWHM minimum radius limit",
-                        variable=self.use_fwhm_limit).grid(row=3, column=0, columnspan=2, sticky=tk.W, padx=5)
-
         # Filter presets
         filter_frame = ttk.Frame(param_frame)
-        filter_frame.grid(row=4, column=0, columnspan=4, pady=5)
+        filter_frame.grid(row=3, column=0, columnspan=4, pady=5)
         ttk.Label(filter_frame, text="Filter Presets:").pack(side=tk.LEFT, padx=5)
         ttk.Button(filter_frame, text="Sloan r'", command=lambda: self.set_filter(617)).pack(side=tk.LEFT, padx=2)
         ttk.Button(filter_frame, text="Sloan i'", command=lambda: self.set_filter(748)).pack(side=tk.LEFT, padx=2)
@@ -518,7 +557,7 @@ class ApertureContrastGUI:
         process_frame = ttk.LabelFrame(main_frame, text="Processing", padding="5")
         process_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
 
-        ttk.Button(process_frame, text="Generate Aperture-Based Contrast Curve",
+        ttk.Button(process_frame, text="Generate Contrast Curve",
                    command=self.generate_curve).grid(row=0, column=0, padx=5)
 
         # Save
@@ -553,8 +592,8 @@ class ApertureContrastGUI:
         text_frame.columnconfigure(0, weight=1)
         text_frame.rowconfigure(0, weight=1)
 
-        self.log_message("Aperture-Based Contrast Curve Generator Ready")
-        self.log_message("Uses small aperture photometry to find local maxima at each radius")
+        self.log_message("Contrast Curve Generator Ready")
+        self.log_message("Analyzes annuli to find local maxima and minima")
 
     def log_message(self, message):
         """Add message to status area."""
@@ -621,17 +660,17 @@ class ApertureContrastGUI:
             self.log_message(f"Error loading file: {str(e)}")
 
     def generate_curve(self):
-        """Generate the aperture-based contrast curve."""
+        """Generate the contrast curve."""
         if self.image_data is None:
             messagebox.showerror("Error", "Please load a FITS file first")
             return
 
         try:
-            self.log_message("Generating aperture-based contrast curve...")
-            self.log_message("This may take a moment...")
+            self.log_message("Generating contrast curve...")
+            self.log_message("Finding local maxima and minima in annuli...")
 
             # Create contrast curve generator
-            self.ccg = ApertureContrastCurveGenerator(
+            self.ccg = ContrastCurveGenerator(
                 self.image_data,
                 pixel_scale=self.pixel_scale.get(),
                 wavelength=self.wavelength.get() * 1e-9,
@@ -639,30 +678,21 @@ class ApertureContrastGUI:
                 header=self.header
             )
 
-            # Determine manual minimum radius (0 means automatic)
-            manual_min = self.min_radius.get() if self.min_radius.get() > 0 else None
+            # Get minimum radius from GUI
+            manual_min = self.min_radius.get()
 
             # Generate plot
             fig = self.ccg.plot_contrast_curve(
                 confidence_level=self.confidence_level.get(),
-                aperture_size=self.aperture_size.get(),
-                max_radius=self.max_radius.get(),
-                use_fwhm_limit=self.use_fwhm_limit.get(),
-                manual_min_radius=manual_min
+                min_radius=manual_min,
+                max_radius=self.max_radius.get()
             )
 
             # Store figure
             self.current_figure = fig
 
-            self.log_message("Aperture-based contrast curve generated successfully!")
-            self.log_message(f"Using {self.aperture_size.get()}×{self.aperture_size.get()} pixel apertures")
-            self.log_message(f"Maximum radius: {self.max_radius.get()} pixels")
-            if self.min_radius.get() > 0:
-                self.log_message(f"Manual minimum radius: {self.min_radius.get()} pixels")
-            elif self.use_fwhm_limit.get():
-                self.log_message("FWHM minimum radius limit: ENABLED")
-            else:
-                self.log_message("FWHM minimum radius limit: DISABLED")
+            self.log_message("Contrast curve generated successfully!")
+            self.log_message(f"Detection limit: mean(maxima) + {self.confidence_level.get()} × avg(σ_max, σ_min)")
 
         except Exception as e:
             error_msg = str(e)
@@ -689,9 +719,9 @@ class ApertureContrastGUI:
 
 def run_gui():
     """Run the GUI application."""
-    print("=== Starting Aperture-Based Contrast Curve Generator ===")
+    print("=== Starting Contrast Curve Generator ===")
     root = tk.Tk()
-    app = ApertureContrastGUI(root)
+    app = ContrastCurveGUI(root)
     root.mainloop()
 
 
