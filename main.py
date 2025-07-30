@@ -1,8 +1,8 @@
 """
-Complete Final Contrast Curve Generator with Debugging for Minima
-================================================================
+Complete Final Contrast Curve Generator
+=======================================
 
-Modified version with extensive debugging output to diagnose minima issues
+Clean version with corrected minima handling and top-positioned annotations
 """
 
 import numpy as np
@@ -141,14 +141,6 @@ def calculate_contrast_curve_paper_method(image, pixel_scale=0.0135, min_radius=
     print(f"Dynamic range: {dynamic_range:.1f}")
     print(f"PSF FWHM: {fwhm_pixels:.2f} pixels ({fwhm_arcsec:.3f} arcsec)")
 
-    # ===== NEW DEBUGGING INFO =====
-    print(f"\n=== Image Statistics ===")
-    print(f"Image min value: {np.min(image):.2e}")
-    print(f"Image max value: {np.max(image):.2e}")
-    print(f"Image mean: {np.mean(image):.2e}")
-    print(f"Background (darkest corner median): {background:.2e}")
-    print(f"Any negative values in image? {np.any(image < 0)}")
-
     # Storage for all extrema (for plotting)
     all_max_separations = []
     all_max_values = []
@@ -184,18 +176,56 @@ def calculate_contrast_curve_paper_method(image, pixel_scale=0.0135, min_radius=
 
         # Calculate detection limit following paper method
         if len(max_vals) > 0:
-            # Step 1: Mean value of the maxima
-            mean_maxima = np.mean(max_vals)
+            # First, identify and exclude bright detections from statistics
+            # A detection is defined as being significantly above the noise
+            # Use a preliminary estimate: median + 3*MAD (Median Absolute Deviation)
+            max_median = np.median(max_vals)
+            max_mad = np.median(np.abs(max_vals - max_median))
+            detection_threshold = max_median + 3 * max_mad * 1.4826  # 1.4826 converts MAD to std
 
-            # Step 2: Standard deviation of maxima
-            if len(max_vals) > 1:
-                sigma_maxima = np.std(max_vals, ddof=1)  # Sample std
+            # Separate detections from noise peaks
+            noise_peaks = max_vals[max_vals <= detection_threshold]
+            detections_in_annulus = max_vals[max_vals > detection_threshold]
+
+            # Use only noise peaks for calculating detection limit
+            if len(noise_peaks) > 0:
+                # Step 1: Mean value of the noise peaks (excluding detections)
+                mean_maxima = np.mean(noise_peaks)
+
+                # Step 2: Standard deviation of noise peaks
+                if len(noise_peaks) > 1:
+                    sigma_maxima = np.std(noise_peaks, ddof=1)
+                else:
+                    sigma_maxima = 0.0
             else:
-                sigma_maxima = 0.0  # Can't calculate std with 1 point
+                # All peaks are detections - use original values with higher weight on std
+                mean_maxima = np.mean(max_vals)
+                sigma_maxima = np.std(max_vals, ddof=1) if len(max_vals) > 1 else 0.0
 
-            # Step 3: Standard deviation of minima
+            # Step 3: Standard deviation of minima with outlier clipping
             if len(min_vals) > 1:
-                sigma_minima = np.std(min_vals, ddof=1)  # Sample std
+                # Clip extreme outliers from minima before calculating std
+                # Use percentile clipping to remove very low values
+                min_vals_clipped = min_vals.copy()
+                percentile_5 = np.percentile(min_vals_clipped, 5)
+                percentile_95 = np.percentile(min_vals_clipped, 95)
+
+                # Remove values below 5th percentile if they're extreme outliers
+                # (more than 3x the interquartile range below the 25th percentile)
+                q25 = np.percentile(min_vals_clipped, 25)
+                q75 = np.percentile(min_vals_clipped, 75)
+                iqr = q75 - q25
+                extreme_low_threshold = q25 - 3 * iqr
+
+                # Only clip if we have extreme outliers
+                if percentile_5 < extreme_low_threshold:
+                    min_vals_clipped = min_vals_clipped[min_vals_clipped >= percentile_5]
+
+                # Calculate std on clipped values
+                if len(min_vals_clipped) > 1:
+                    sigma_minima = np.std(min_vals_clipped, ddof=1)
+                else:
+                    sigma_minima = np.std(min_vals, ddof=1)  # Fallback to original
             elif len(min_vals) == 1:
                 sigma_minima = 0.0  # Can't calculate std with 1 point
             else:
@@ -207,16 +237,6 @@ def calculate_contrast_curve_paper_method(image, pixel_scale=0.0135, min_radius=
 
             # Step 5: Detection limit = mean(maxima) + 5 * avg_sigma
             detection_limit = mean_maxima + 5 * avg_sigma
-
-            # Debug info for first few annuli
-            if r < min_radius + 5:
-                print(f"\nRadius {r} pixels:")
-                print(f"  {len(max_vals)} maxima, {len(min_vals)} minima")
-                print(f"  mean(maxima) = {mean_maxima:.2f}")
-                print(f"  σ(maxima) = {sigma_maxima:.2f}")
-                print(f"  σ(minima) = {sigma_minima:.2f}")
-                print(f"  avg σ = {avg_sigma:.2f}")
-                print(f"  detection limit = {detection_limit:.2f}")
 
         else:
             # No maxima in this annulus - skip
@@ -239,22 +259,6 @@ def calculate_contrast_curve_paper_method(image, pixel_scale=0.0135, min_radius=
         smoothed = gaussian_filter1d(detection_limits[1:], sigma=2.5)
         detection_limits[1:] = smoothed
 
-    # ===== NEW DEBUGGING INFO FOR EXTREMA =====
-    print(f"\n=== Extrema Value Statistics ===")
-    print(f"Total maxima found: {len(all_max_values)}")
-    if len(all_max_values) > 0:
-        print(f"Maxima value range: {np.min(all_max_values):.2e} to {np.max(all_max_values):.2e}")
-        print(f"Maxima mean: {np.mean(all_max_values):.2e}")
-        print(f"First 10 maxima values: {all_max_values[:10]}")
-
-    print(f"\nTotal minima found: {len(all_min_values)}")
-    if len(all_min_values) > 0:
-        print(f"Minima value range: {np.min(all_min_values):.2e} to {np.max(all_min_values):.2e}")
-        print(f"Minima mean: {np.mean(all_min_values):.2e}")
-        print(f"First 10 minima values: {all_min_values[:10]}")
-        print(f"Any negative minima? {np.any(all_min_values < 0)}")
-        print(f"Number of minima < 1e-10: {np.sum(all_min_values < 1e-10)}")
-
     # Convert to magnitudes
     # Ensure no zeros or negative values
     noise_floor = 1e-10
@@ -270,31 +274,12 @@ def calculate_contrast_curve_paper_method(image, pixel_scale=0.0135, min_radius=
         min_values_abs = np.abs(all_min_values)
         min_values_abs = np.maximum(min_values_abs, noise_floor)
         min_mags = -2.5 * np.log10(min_values_abs / star_flux)
-
-        # Debug info for minima correction
-        print(f"\n=== Minima Correction (Absolute Value Method) ===")
-        print(f"Original minima range: {np.min(all_min_values):.2e} to {np.max(all_min_values):.2e}")
-        print(f"Absolute value range: {np.min(min_values_abs):.2e} to {np.max(min_values_abs):.2e}")
-        print(f"Expected magnitude range: {np.min(min_mags):.2f} to {np.max(min_mags):.2f}")
     else:
         min_mags = np.array([])
 
     # Detection limit magnitudes
     detection_limits = np.maximum(detection_limits, noise_floor)
     limit_mags = -2.5 * np.log10(detection_limits / star_flux)
-
-    # ===== NEW DEBUGGING INFO FOR MAGNITUDES =====
-    print(f"\n=== Magnitude Statistics ===")
-    if len(max_mags) > 0:
-        print(f"Maxima magnitude range: {np.min(max_mags):.2f} to {np.max(max_mags):.2f}")
-        print(f"First 10 maxima mags: {max_mags[:10]}")
-
-    if len(min_mags) > 0:
-        print(f"Minima magnitude range: {np.min(min_mags):.2f} to {np.max(min_mags):.2f}")
-        print(f"First 10 minima mags: {min_mags[:10]}")
-        print(f"Number of minima mags > 10: {np.sum(min_mags > 10)}")
-        print(f"Number of minima mags > 15: {np.sum(min_mags > 15)}")
-        print(f"Number of minima mags > 20: {np.sum(min_mags > 20)}")
 
     # Convert pixels to arcsec
     all_max_separations_arcsec = all_max_separations * pixel_scale
@@ -387,14 +372,6 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
     fig.suptitle(f'{title} - {telescope_name} {telescope_diameter:.1f}m Telescope',
                  fontsize=14, fontweight='bold')
 
-    # ===== NEW DEBUGGING INFO FOR PLOTTING =====
-    print(f"\n=== Plotting Statistics ===")
-    print(f"Y-axis will be set to: 0 to {max(10, np.max(limits) + 0.5):.1f}")
-    if len(min_mags) > 0:
-        print(f"Minima mags that would be visible (< {max(10, np.max(limits) + 0.5):.1f}): "
-              f"{np.sum(min_mags < max(10, np.max(limits) + 0.5))}")
-        print(f"Minima mags that are off the plot: {np.sum(min_mags >= max(10, np.max(limits) + 0.5))}")
-
     # Plot local maxima (empty squares)
     ax.scatter(max_seps, max_mags, marker='s', s=30,
                facecolors='none', edgecolors='black',
@@ -409,72 +386,11 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
     ax.plot(radii, limits, 'r-', linewidth=2.5,
             label=f'{confidence_level}σ Detection Limit')
 
-    # Find and annotate the peak delta-magnitude closest to the nearest detection
-    if len(limits) > 10:  # Need enough points
-        # First, check if we have any detections to reference
-        peak_idx = None
-        peak_sep = None
-        peak_limit = None
-
-        # Find detections (maxima below the limit curve)
-        if len(max_seps) > 0:
-            limit_at_max = np.interp(max_seps, radii, limits)
-            detections = max_mags < limit_at_max
-
-            if np.any(detections):
-                # Find the detection with smallest separation
-                det_seps = max_seps[detections]
-                closest_detection_sep = np.min(det_seps)
-
-                # Find all local maxima in the detection limit curve (skip origin)
-                peaks, _ = find_peaks(limits[1:])  # Skip origin point
-                peaks = peaks + 1  # Adjust indices to account for skipped origin
-
-                if len(peaks) > 0:
-                    # Find the peak closest to the closest detection
-                    peak_distances_to_detection = np.abs(radii[peaks] - closest_detection_sep)
-                    closest_peak_idx = np.argmin(peak_distances_to_detection)
-                    peak_idx = peaks[closest_peak_idx]
-                else:
-                    # No local maxima found, use global maximum (skip origin)
-                    peak_idx = np.argmax(limits[1:]) + 1
-
-        # If no detections found, just use the global maximum (skip origin)
-        if peak_idx is None:
-            peak_idx = np.argmax(limits[1:]) + 1
-
-        peak_sep = radii[peak_idx]
-        peak_limit = limits[peak_idx]
-
-        # Convert to pixels for annotation
-        peak_sep_pixels = peak_sep / results['pixel_scale']
-
-        # Dynamic positioning for peak annotation
-        x_range = np.max(radii) - np.min(radii)
-        y_range = np.max(limits) - np.min(limits)
-
-        # Position peak annotation in upper RIGHT area of plot
-        peak_annotation_x = peak_sep + 0.2 * x_range
-        peak_annotation_y = peak_limit + 0.3 * y_range
-
-        # Make sure annotation stays within plot bounds
-        peak_annotation_x = min(peak_annotation_x, np.max(radii) - 0.05 * x_range)
-        peak_annotation_y = min(peak_annotation_y, np.max(limits) + 0.4 * y_range)
-
-        # If peak is too close to the right edge, position annotation to the left
-        if peak_sep > 0.7 * np.max(radii):
-            peak_annotation_x = peak_sep - 0.2 * x_range
-            peak_annotation_x = max(peak_annotation_x, np.min(radii) + 0.05 * x_range)
-
-        # Annotate the peak delta-magnitude point
-        annotation_text = (f'Peak Δm:\n' +
-                           f'Δm = {peak_limit:.1f} at {peak_sep:.2f}" ({peak_sep_pixels:.0f} pix)')
-        ax.annotate(annotation_text,
-                    xy=(peak_sep, peak_limit),
-                    xytext=(peak_annotation_x, peak_annotation_y),
-                    arrowprops=dict(arrowstyle='->', color='red', lw=1),
-                    fontsize=10, ha='left',
-                    bbox=dict(boxstyle='round,pad=0.3', facecolor='lightblue', alpha=0.5))
+    # Get plot limits for positioning annotations
+    x_min, x_max = ax.get_xlim()
+    y_min, y_max = 0, max(10, np.max(limits) + 0.5)
+    x_range = x_max - x_min
+    y_range = y_max - y_min
 
     # Find and highlight detections (maxima below the limit)
     if len(max_seps) > 0:
@@ -499,22 +415,17 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
                 # Get the limiting magnitude at this separation
                 limiting_mag = np.interp(sep, radii, limits)
 
-                # Dynamic positioning for detection annotation
-                x_range = np.max(radii) - np.min(radii)
-                y_range = np.max(limits) - np.min(limits)
-
-                # Position detection annotation in upper LEFT area of plot
-                det_annotation_x = sep - 0.3 * x_range
-                det_annotation_y = mag + 0.4 * y_range
+                # Position detection annotation in upper area - LEFT side
+                det_annotation_x = sep - 0.15 * x_range
+                det_annotation_y = y_min + 0.85 * y_range  # Near top
 
                 # Make sure annotation stays within plot bounds
-                det_annotation_x = max(det_annotation_x, np.min(radii) + 0.05 * x_range)
-                det_annotation_y = min(det_annotation_y, np.max(limits) + 0.4 * y_range)
+                det_annotation_x = max(det_annotation_x, x_min + 0.05 * x_range)
 
                 # If detection is too close to the left edge, position annotation to the right
-                if sep < 0.3 * np.max(radii):
-                    det_annotation_x = sep + 0.2 * x_range
-                    det_annotation_x = min(det_annotation_x, np.max(radii) - 0.05 * x_range)
+                if sep < 0.3 * x_max:
+                    det_annotation_x = sep + 0.15 * x_range
+                    det_annotation_x = min(det_annotation_x, x_max - 0.2 * x_range)
 
                 # Annotation text
                 sep_pixels = sep / results['pixel_scale']
@@ -535,7 +446,6 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
     # Secondary x-axis for pixels
     ax2 = ax.twiny()
     ax2.set_xlabel('Separation [pixels]', fontsize=13)
-    x_min, x_max = ax.get_xlim()
     ax2.set_xlim(x_min / results['pixel_scale'], x_max / results['pixel_scale'])
 
     # Make sure the pixel axis ticks are at nice round numbers
@@ -549,7 +459,7 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
     ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
 
     # Set y-axis limits
-    ax.set_ylim(0, max(10, np.max(limits) + 0.5))
+    ax.set_ylim(y_min, y_max)
 
     # Set tick parameters
     ax.tick_params(axis='both', which='major', labelsize=11)
