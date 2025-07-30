@@ -271,6 +271,14 @@ class ContrastCurveGenerator:
         """Generate contrast curve by analyzing annuli."""
         print("=== Generating contrast curve ===")
 
+        # Clear any previous data
+        self.all_radii_max = np.array([])
+        self.all_maxima = np.array([])
+        self.all_radii_min = np.array([])
+        self.all_minima = np.array([])
+        self.annulus_centers = np.array([])
+        self.detection_limits = np.array([])
+
         # Get star flux for magnitude conversion
         self.star_flux = float(np.max(self.image))
 
@@ -378,6 +386,9 @@ class ContrastCurveGenerator:
                             save_path=None, show_plot=True):
         """Plot the contrast curve showing all extrema and detection limit."""
         print("=== Plotting contrast curve ===")
+
+        # Clear any existing plot
+        plt.close('all')
 
         # Generate the contrast curve
         radii, limits = self.generate_contrast_curve(
@@ -506,8 +517,8 @@ class ContrastCurveGenerator:
             significance = limit_interp[detections] - detection_mags
             sorted_indices = np.argsort(significance)[::-1]  # Most significant first
 
-            # Annotate up to 2 most significant detections
-            n_annotations = min(2, len(sorted_indices))
+            # Annotate only the most significant detection
+            n_annotations = min(1, len(sorted_indices))
 
             for i in range(n_annotations):
                 idx = sorted_indices[i]
@@ -527,14 +538,6 @@ class ContrastCurveGenerator:
                                 xytext=(sep + 0.05, mag + 0.8),
                                 arrowprops=dict(arrowstyle='->', color='black', lw=0.5),
                                 fontsize=11, ha='left')
-                else:  # Second detection
-                    # Position differently to avoid overlap
-                    sep_pixels = sep / self.pixel_scale
-                    annotation_text = f'Limiting Δm = {limiting_mag:.2f}\nSeparation = {sep:.3f}" ({sep_pixels:.1f} pix)'
-                    ax.annotate(annotation_text,
-                                xy=(sep, mag),
-                                xytext=(sep - 0.1, mag - 0.8),
-                                fontsize=11, ha='center')
 
             print(f"Found {np.sum(detections)} detections below the detection limit")
 
