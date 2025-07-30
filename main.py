@@ -344,6 +344,10 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
     # Create plot
     fig, ax = plt.subplots(1, 1, figsize=(10, 7))
 
+    # Clear the figure explicitly
+    fig.clear()
+    ax = fig.add_subplot(111)
+
     # Add title with target name
     fig.suptitle(f'{title} - {telescope_name} {telescope_diameter:.1f}m Telescope',
                  fontsize=14, fontweight='bold')
@@ -676,6 +680,11 @@ class FinalContrastCurveGUI:
             # Close any existing figures to prevent data persistence
             plt.close('all')
 
+            # Clear any existing figure reference
+            if hasattr(self, 'fig'):
+                plt.close(self.fig)
+                del self.fig
+
             # Calculate curve
             telescope_diameter_m = self.telescope_diameter.get() * 0.0254  # inches to meters
 
@@ -699,7 +708,7 @@ class FinalContrastCurveGUI:
                 header_dict = dict(self.header)
                 date_obs = header_dict.get('DATE-OBS', None)
 
-            # Plot
+            # Plot and store the new figure
             self.fig = plot_contrast_curve_full(
                 results,
                 title=self.target_name.get(),
@@ -730,6 +739,11 @@ class FinalContrastCurveGUI:
             return
 
         try:
+            # Force a redraw to ensure all elements are current
+            self.fig.canvas.draw_idle()
+            self.fig.canvas.flush_events()
+
+            # Save the figure with current state
             self.fig.savefig(filename, dpi=300, bbox_inches='tight', facecolor='white')
             self.log_status(f"Saved: {Path(filename).name}")
             messagebox.showinfo("Success", "Plot saved successfully!")
