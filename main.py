@@ -729,8 +729,9 @@ class FinalContrastCurveGUI:
 
     def save_plot(self):
         """Save the current plot."""
-        if not hasattr(self, 'fig'):
-            messagebox.showerror("Error", "Generate a curve first")
+        # Check if there are any figures open
+        if len(plt.get_fignums()) == 0:
+            messagebox.showerror("Error", "No plot to save. Generate a curve first.")
             return
 
         filename = self.save_path.get()
@@ -739,16 +740,17 @@ class FinalContrastCurveGUI:
             return
 
         try:
-            # Force a redraw to ensure all elements are current
-            self.fig.canvas.draw_idle()
-            self.fig.canvas.flush_events()
+            # Get the current figure from pyplot
+            current_fig = plt.gcf()
 
-            # Save the figure with current state
-            self.fig.savefig(filename, dpi=300, bbox_inches='tight', facecolor='white')
+            # Save it
+            current_fig.savefig(filename, dpi=300, bbox_inches='tight', facecolor='white')
+
             self.log_status(f"Saved: {Path(filename).name}")
             messagebox.showinfo("Success", "Plot saved successfully!")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save: {str(e)}")
+            self.log_status(f"Error: {str(e)}")
 
 
 # Command line interface
