@@ -1,8 +1,8 @@
 """
-Complete Final Contrast Curve Generator
-=======================================
+Contrast Curve Generator - Simplified Robust Version
+===================================================
 
-Clean version with corrected minima handling and top-positioned annotations
+Back to basics with minimal filtering and robust statistics
 """
 
 import numpy as np
@@ -102,9 +102,10 @@ def find_all_extrema_in_annulus(image, center, r_inner, r_outer, footprint=3):
 
 
 def calculate_contrast_curve_paper_method(image, pixel_scale=0.0135, min_radius=2,
-                                          max_radius=90, annulus_width=3,
+                                          max_radius=50, annulus_width=3,
                                           telescope_diameter=2.54, wavelength=617e-9,
-                                          target_name="Unknown Target", telescope_name="Hooker"):
+                                          target_name="Unknown Target", telescope_name="Hooker",
+                                          smoothing_sigma=3.0):
     """
     Calculate contrast curve following the paper method exactly:
     Detection limit = mean(maxima) + 5 * average(σ_maxima, σ_minima)
@@ -176,58 +177,24 @@ def calculate_contrast_curve_paper_method(image, pixel_scale=0.0135, min_radius=
 
         # Calculate detection limit following paper method
         if len(max_vals) > 0:
-            # First, identify and exclude bright detections from statistics
-            # A detection is defined as being significantly above the noise
-            # Use a preliminary estimate: median + 3*MAD (Median Absolute Deviation)
-            max_median = np.median(max_vals)
-            max_mad = np.median(np.abs(max_vals - max_median))
-            detection_threshold = max_median + 3 * max_mad * 1.4826  # 1.4826 converts MAD to std
+            # Use robust statistics throughout
+            # Step 1: Median value of the maxima (robust against outliers)
+            mean_maxima = np.median(max_vals)
 
-            # Separate detections from noise peaks
-            noise_peaks = max_vals[max_vals <= detection_threshold]
-            detections_in_annulus = max_vals[max_vals > detection_threshold]
-
-            # Use only noise peaks for calculating detection limit
-            if len(noise_peaks) > 0:
-                # Step 1: Mean value of the noise peaks (excluding detections)
-                mean_maxima = np.mean(noise_peaks)
-
-                # Step 2: Standard deviation of noise peaks
-                if len(noise_peaks) > 1:
-                    sigma_maxima = np.std(noise_peaks, ddof=1)
-                else:
-                    sigma_maxima = 0.0
+            # Step 2: MAD-based standard deviation of maxima
+            if len(max_vals) > 1:
+                mad_maxima = np.median(np.abs(max_vals - mean_maxima))
+                sigma_maxima = mad_maxima * 1.4826  # Convert MAD to std equivalent
             else:
-                # All peaks are detections - use original values with higher weight on std
-                mean_maxima = np.mean(max_vals)
-                sigma_maxima = np.std(max_vals, ddof=1) if len(max_vals) > 1 else 0.0
+                sigma_maxima = 0.0
 
-            # Step 3: Standard deviation of minima with outlier clipping
+            # Step 3: MAD-based standard deviation of minima
             if len(min_vals) > 1:
-                # Clip extreme outliers from minima before calculating std
-                # Use percentile clipping to remove very low values
-                min_vals_clipped = min_vals.copy()
-                percentile_5 = np.percentile(min_vals_clipped, 5)
-                percentile_95 = np.percentile(min_vals_clipped, 95)
-
-                # Remove values below 5th percentile if they're extreme outliers
-                # (more than 3x the interquartile range below the 25th percentile)
-                q25 = np.percentile(min_vals_clipped, 25)
-                q75 = np.percentile(min_vals_clipped, 75)
-                iqr = q75 - q25
-                extreme_low_threshold = q25 - 3 * iqr
-
-                # Only clip if we have extreme outliers
-                if percentile_5 < extreme_low_threshold:
-                    min_vals_clipped = min_vals_clipped[min_vals_clipped >= percentile_5]
-
-                # Calculate std on clipped values
-                if len(min_vals_clipped) > 1:
-                    sigma_minima = np.std(min_vals_clipped, ddof=1)
-                else:
-                    sigma_minima = np.std(min_vals, ddof=1)  # Fallback to original
+                median_minima = np.median(min_vals)
+                mad_minima = np.median(np.abs(min_vals - median_minima))
+                sigma_minima = mad_minima * 1.4826
             elif len(min_vals) == 1:
-                sigma_minima = 0.0  # Can't calculate std with 1 point
+                sigma_minima = 0.0
             else:
                 # No minima - use sigma of maxima
                 sigma_minima = sigma_maxima
@@ -235,8 +202,14 @@ def calculate_contrast_curve_paper_method(image, pixel_scale=0.0135, min_radius=
             # Step 4: Average sigma of maxima and minima
             avg_sigma = (sigma_maxima + sigma_minima) / 2.0
 
-            # Step 5: Detection limit = mean(maxima) + 5 * avg_sigma
+            # Step 5: Detection limit = median(maxima) + 5 * avg_sigma
             detection_limit = mean_maxima + 5 * avg_sigma
+
+            # Sanity check - if detection limit is negative or huge, cap it
+            if detection_limit < 0:
+                detection_limit = mean_maxima + 5 * noise_std
+            elif detection_limit > star_flux:
+                detection_limit = star_flux
 
         else:
             # No maxima in this annulus - skip
@@ -255,8 +228,8 @@ def calculate_contrast_curve_paper_method(image, pixel_scale=0.0135, min_radius=
 
     # Smooth detection limits curve
     if len(detection_limits) > 10:
-        # Apply smoothing (skip origin)
-        smoothed = gaussian_filter1d(detection_limits[1:], sigma=2.5)
+        # Apply smoothing with adjustable sigma
+        smoothed = gaussian_filter1d(detection_limits[1:], sigma=smoothing_sigma)
         detection_limits[1:] = smoothed
 
     # Convert to magnitudes
@@ -418,17 +391,9 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
                 # Get the limiting magnitude at this separation
                 limiting_mag = np.interp(sep, radii, limits)
 
-                # Position detection annotation in upper area - LEFT side
-                det_annotation_x = sep - 0.15 * x_range
+                # Position detection annotation in upper center area
+                det_annotation_x = (x_min + x_max) / 2  # Center horizontally
                 det_annotation_y = y_min + 0.85 * y_range  # Near top
-
-                # Make sure annotation stays within plot bounds
-                det_annotation_x = max(det_annotation_x, x_min + 0.05 * x_range)
-
-                # If detection is too close to the left edge, position annotation to the right
-                if sep < 0.3 * x_max:
-                    det_annotation_x = sep + 0.15 * x_range
-                    det_annotation_x = min(det_annotation_x, x_max - 0.2 * x_range)
 
                 # Annotation text
                 sep_pixels = sep / results['pixel_scale']
@@ -439,7 +404,7 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
                             xy=(sep, mag),
                             xytext=(det_annotation_x, det_annotation_y),
                             arrowprops=dict(arrowstyle='->', color='black', lw=0.5),
-                            fontsize=10, ha='left',
+                            fontsize=10, ha='center',
                             bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.5))
 
     # Labels and formatting
@@ -492,8 +457,8 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
 
     # Create the text box
     info_str = '\n'.join(info_text)
-    ax.text(0.98, 0.02, info_str, transform=ax.transAxes,
-            fontsize=9, verticalalignment='bottom', horizontalalignment='right',
+    ax.text(0.02, 0.98, info_str, transform=ax.transAxes,
+            fontsize=9, verticalalignment='top', horizontalalignment='left',
             bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
                       edgecolor='gray', alpha=0.9))
 
@@ -518,7 +483,7 @@ class FinalContrastCurveGUI:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Contrast Curve Generator - Final Version")
+        self.root.title("Contrast Curve Generator")
         self.root.geometry("800x800")
 
         self.image = None
@@ -535,6 +500,7 @@ class FinalContrastCurveGUI:
         self.telescope_diameter = tk.DoubleVar(value=100.0)  # inches
         self.max_radius = tk.IntVar(value=50)
         self.min_radius = tk.IntVar(value=2)
+        self.smoothing_sigma = tk.DoubleVar(value=3.0)
         self.save_path = tk.StringVar()
 
         self.create_widgets()
@@ -589,9 +555,16 @@ class FinalContrastCurveGUI:
         ttk.Label(param_frame, text="Wavelength (nm):").grid(row=4, column=2, sticky=tk.W)
         ttk.Entry(param_frame, textvariable=self.wavelength, width=10).grid(row=4, column=3)
 
+        # Smoothing control
+        ttk.Label(param_frame, text="Smoothing (sigma):").grid(row=5, column=0, sticky=tk.W)
+        ttk.Spinbox(param_frame, from_=0.0, to=10.0, increment=0.5,
+                    textvariable=self.smoothing_sigma, width=10).grid(row=5, column=1)
+        ttk.Label(param_frame, text="(0=none, 5=aggressive)", font=('TkDefaultFont', 8)).grid(row=5, column=2,
+                                                                                              columnspan=2, sticky=tk.W)
+
         # Filter presets
         filter_frame = ttk.Frame(param_frame)
-        filter_frame.grid(row=5, column=0, columnspan=4, pady=5)
+        filter_frame.grid(row=6, column=0, columnspan=4, pady=5)
         ttk.Label(filter_frame, text="Filter Presets:").pack(side=tk.LEFT, padx=5)
         ttk.Button(filter_frame, text="Sloan r'", command=lambda: self.set_filter(617)).pack(side=tk.LEFT, padx=2)
         ttk.Button(filter_frame, text="Sloan i'", command=lambda: self.set_filter(748)).pack(side=tk.LEFT, padx=2)
@@ -628,7 +601,7 @@ class FinalContrastCurveGUI:
         main_frame.rowconfigure(4, weight=1)
 
         self.log_status("Contrast Curve Generator Ready")
-        self.log_status("Method: mean(maxima) + 5×avg(σ_max, σ_min)")
+        self.log_status("Method: median(maxima) + 5×avg(MAD_max, MAD_min)")
 
     def log_status(self, message):
         """Add message to status area."""
@@ -714,7 +687,8 @@ class FinalContrastCurveGUI:
                 telescope_diameter=telescope_diameter_m,
                 wavelength=self.wavelength.get() * 1e-9,
                 target_name=self.target_name.get(),
-                telescope_name=self.telescope_name.get()
+                telescope_name=self.telescope_name.get(),
+                smoothing_sigma=self.smoothing_sigma.get()
             )
 
             self.results = results
