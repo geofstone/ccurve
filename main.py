@@ -23,13 +23,17 @@ class ContrastCurveGenerator:
     """Generate contrast curves using annular analysis of local extrema."""
 
     def __init__(self, image_data, pixel_scale=None, wavelength=None,
-                 telescope_diameter=None, star_position=None, header=None):
+                 telescope_diameter=None, star_position=None, header=None,
+                 telescope_name=None, target_name=None):
         """Initialize the contrast curve generator."""
         print("=== Contrast Curve Generator ===")
 
         self.image = np.array(image_data, dtype=float)
         self.header = header or {}
-        self.telescope_diameter = telescope_diameter or 2.54  # Hooker telescope
+        self.telescope_diameter_inches = telescope_diameter or 100.0  # Default to Hooker telescope (100 inches)
+        self.telescope_diameter = self.telescope_diameter_inches * 0.0254  # Convert to meters
+        self.telescope_name = telescope_name or "Hooker"
+        self.target_name = target_name or self.header.get('OBJECT', 'Unknown Target')
 
         # Extract parameters
         self.pixel_scale = self._extract_pixel_scale(pixel_scale)
@@ -40,7 +44,8 @@ class ContrastCurveGenerator:
         # Measure PSF FWHM for reference
         self.fwhm_pixels, self.fwhm_arcsec = self.measure_psf_fwhm()
 
-        print(f"Hooker Telescope (2.54m) Analysis")
+        print(f"{self.telescope_name} Telescope ({self.telescope_diameter:.2f}m) Analysis")
+        print(f"Target: {self.target_name}")
         print(f"Pixel scale: {self.pixel_scale * 1000:.1f} mas/pixel")
         print(f"Wavelength: {self.wavelength * 1e9:.0f} nm")
         print(f"Image size: {self.image.shape}")
@@ -172,7 +177,7 @@ class ContrastCurveGenerator:
         y, x = np.ogrid[:self.image.shape[0], :self.image.shape[1]]
 
         # Create annulus mask
-        dist_from_center = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+        dist_from_center = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
         annulus_mask = (dist_from_center >= inner_radius) & (dist_from_center <= outer_radius)
 
         # Find local maxima using maximum filter
@@ -196,10 +201,10 @@ class ContrastCurveGenerator:
         min_positions = np.where(is_local_min)
 
         # Calculate distances
-        max_distances = np.sqrt((max_positions[1] - center_x)**2 +
-                               (max_positions[0] - center_y)**2)
-        min_distances = np.sqrt((min_positions[1] - center_x)**2 +
-                               (min_positions[0] - center_y)**2)
+        max_distances = np.sqrt((max_positions[1] - center_x) ** 2 +
+                                (max_positions[0] - center_y) ** 2)
+        min_distances = np.sqrt((min_positions[1] - center_x) ** 2 +
+                                (min_positions[0] - center_y) ** 2)
 
         # If we have too few minima, sample from the lowest non-zero values
         if len(min_values) < 10:
@@ -217,12 +222,12 @@ class ContrastCurveGenerator:
                     # Sample up to 30 points
                     n_samples = min(30, len(low_positions[0]))
                     if n_samples > 0:
-                        indices = np.linspace(0, len(low_positions[0])-1, n_samples, dtype=int)
+                        indices = np.linspace(0, len(low_positions[0]) - 1, n_samples, dtype=int)
                         sampled_positions = (low_positions[0][indices], low_positions[1][indices])
 
                         sampled_values = self.image[sampled_positions]
-                        sampled_distances = np.sqrt((sampled_positions[1] - center_x)**2 +
-                                                  (sampled_positions[0] - center_y)**2)
+                        sampled_distances = np.sqrt((sampled_positions[1] - center_x) ** 2 +
+                                                    (sampled_positions[0] - center_y) ** 2)
 
                         min_values = np.concatenate([min_values, sampled_values])
                         min_distances = np.concatenate([min_distances, sampled_distances])
@@ -235,7 +240,7 @@ class ContrastCurveGenerator:
 
         # Create annulus mask
         y, x = np.ogrid[:self.image.shape[0], :self.image.shape[1]]
-        dist_from_center = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+        dist_from_center = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
         annulus_mask = (dist_from_center >= inner_radius) & (dist_from_center <= outer_radius)
 
         # Get pixels
@@ -359,8 +364,9 @@ class ContrastCurveGenerator:
 
         # Smooth the detection limit curve for better appearance
         if len(self.detection_limits) > 10:
-            # Apply gentle Gaussian smoothing (skip the origin point)
-            smoothed = gaussian_filter1d(self.detection_limits[1:], sigma=2.0)
+            # Apply stronger Gaussian smoothing (skip the origin point)
+            # Increased sigma from 2.0 to 4.0 for stronger smoothing
+            smoothed = gaussian_filter1d(self.detection_limits[1:], sigma=4.0)
             self.detection_limits[1:] = smoothed
 
         print(f"Found {len(all_maxima)} local maxima and {len(all_minima)} local minima")
@@ -461,6 +467,10 @@ class ContrastCurveGenerator:
         # Create the plot with similar style to example
         fig, ax = plt.subplots(1, 1, figsize=(10, 7))
 
+        # Add title with target name
+        fig.suptitle(f'{self.target_name} - {self.telescope_name} {self.telescope_diameter:.1f}m Telescope',
+                     fontsize=14, fontweight='bold')
+
         # Plot all local maxima with empty squares
         ax.scatter(self.all_radii_max * self.pixel_scale, maxima_delta_mag,
                    marker='s', s=30, facecolors='none', edgecolors='black',
@@ -510,14 +520,18 @@ class ContrastCurveGenerator:
                 # Position annotation
                 if i == 0:  # First detection
                     # Annotate with arrow pointing to the detection
-                    ax.annotate(f'Limiting Δm = {limiting_mag:.2f}',
+                    sep_pixels = sep / self.pixel_scale
+                    annotation_text = f'Limiting Δm = {limiting_mag:.2f}\nSeparation = {sep:.3f}" ({sep_pixels:.1f} pix)'
+                    ax.annotate(annotation_text,
                                 xy=(sep, mag),  # Point to the actual detection
                                 xytext=(sep + 0.05, mag + 0.8),
                                 arrowprops=dict(arrowstyle='->', color='black', lw=0.5),
                                 fontsize=11, ha='left')
                 else:  # Second detection
                     # Position differently to avoid overlap
-                    ax.annotate(f'Limiting Δm = {limiting_mag:.2f}',
+                    sep_pixels = sep / self.pixel_scale
+                    annotation_text = f'Limiting Δm = {limiting_mag:.2f}\nSeparation = {sep:.3f}" ({sep_pixels:.1f} pix)'
+                    ax.annotate(annotation_text,
                                 xy=(sep, mag),
                                 xytext=(sep - 0.1, mag - 0.8),
                                 fontsize=11, ha='center')
@@ -560,7 +574,8 @@ class ContrastCurveGenerator:
 
         # Add information box in lower right
         info_text = []
-        info_text.append(f'Telescope: Hooker 2.54m')
+        info_text.append(f'Target: {self.target_name}')
+        info_text.append(f'Telescope: {self.telescope_name} {self.telescope_diameter:.2f}m')
         info_text.append(f'Wavelength: {self.wavelength * 1e9:.0f} nm')
         info_text.append(f'Pixel scale: {self.pixel_scale * 1000:.1f} mas/pixel')
         info_text.append(f'PSF FWHM: {self.fwhm_arcsec:.3f}" ({self.fwhm_pixels:.1f} pix)')
@@ -589,7 +604,7 @@ class ContrastCurveGenerator:
         ax.text(0.98, 0.02, info_str, transform=ax.transAxes,
                 fontsize=9, verticalalignment='bottom', horizontalalignment='right',
                 bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
-                         edgecolor='gray', alpha=0.9))
+                          edgecolor='gray', alpha=0.9))
 
         # Use a white background
         ax.set_facecolor('white')
@@ -653,16 +668,19 @@ class ContrastCurveGUI:
         print("=== Contrast Curve GUI ===")
 
         self.root = root
-        self.root.title("Hooker Telescope Contrast Curve Generator")
-        self.root.geometry("800x700")
+        self.root.title("Speckle Contrast Curve Generator")
+        self.root.geometry("800x800")
 
         # Variables
         self.file_path = tk.StringVar()
+        self.target_name = tk.StringVar(value="")
         self.confidence_level = tk.DoubleVar(value=5.0)
         self.pixel_scale = tk.DoubleVar(value=0.0135)
         self.wavelength = tk.DoubleVar(value=617)
-        self.max_radius = tk.IntVar(value=90)  # Increased to show ~1.2 arcsec
-        self.min_radius = tk.IntVar(value=2)  # Default to 2 pixels
+        self.telescope_name = tk.StringVar(value="Hooker")
+        self.telescope_diameter = tk.DoubleVar(value=100.0)  # Now in inches
+        self.max_radius = tk.IntVar(value=90)
+        self.min_radius = tk.IntVar(value=2)
         self.save_path = tk.StringVar()
 
         # Current data
@@ -689,30 +707,43 @@ class ContrastCurveGUI:
         param_frame = ttk.LabelFrame(main_frame, text="Parameters", padding="5")
         param_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
 
-        # Row 0: Confidence Level
-        ttk.Label(param_frame, text="Confidence Level (σ):").grid(row=0, column=0, sticky=tk.W, padx=5)
+        # Row 0: Target Name
+        ttk.Label(param_frame, text="Target Name:").grid(row=0, column=0, sticky=tk.W, padx=5)
+        ttk.Entry(param_frame, textvariable=self.target_name, width=30).grid(row=0, column=1, columnspan=3, sticky=tk.W,
+                                                                             padx=5)
+
+        # Row 1: Telescope Name and Diameter
+        ttk.Label(param_frame, text="Telescope Name:").grid(row=1, column=0, sticky=tk.W, padx=5)
+        ttk.Entry(param_frame, textvariable=self.telescope_name, width=15).grid(row=1, column=1, padx=5)
+
+        ttk.Label(param_frame, text="Diameter (inches):").grid(row=1, column=2, sticky=tk.W, padx=5)
+        ttk.Spinbox(param_frame, from_=1.0, to=500.0, increment=1.0,
+                    textvariable=self.telescope_diameter, width=10).grid(row=1, column=3, padx=5)
+
+        # Row 2: Confidence Level
+        ttk.Label(param_frame, text="Confidence Level (σ):").grid(row=2, column=0, sticky=tk.W, padx=5)
         ttk.Spinbox(param_frame, from_=1.0, to=10.0, increment=0.1,
-                    textvariable=self.confidence_level, width=10).grid(row=0, column=1, padx=5)
+                    textvariable=self.confidence_level, width=10).grid(row=2, column=1, padx=5)
 
-        # Row 1: Min and Max Radius
-        ttk.Label(param_frame, text="Min Radius (pixels):").grid(row=1, column=0, sticky=tk.W, padx=5)
+        # Row 3: Min and Max Radius
+        ttk.Label(param_frame, text="Min Radius (pixels):").grid(row=3, column=0, sticky=tk.W, padx=5)
         ttk.Spinbox(param_frame, from_=1, to=50, increment=1,
-                    textvariable=self.min_radius, width=10).grid(row=1, column=1, padx=5)
+                    textvariable=self.min_radius, width=10).grid(row=3, column=1, padx=5)
 
-        ttk.Label(param_frame, text="Max Radius (pixels):").grid(row=1, column=2, sticky=tk.W, padx=5)
+        ttk.Label(param_frame, text="Max Radius (pixels):").grid(row=3, column=2, sticky=tk.W, padx=5)
         ttk.Spinbox(param_frame, from_=10, to=200, increment=10,
-                    textvariable=self.max_radius, width=10).grid(row=1, column=3, padx=5)
+                    textvariable=self.max_radius, width=10).grid(row=3, column=3, padx=5)
 
-        # Row 2: Pixel Scale and Wavelength
-        ttk.Label(param_frame, text="Pixel Scale (arcsec/pixel):").grid(row=2, column=0, sticky=tk.W, padx=5)
-        ttk.Entry(param_frame, textvariable=self.pixel_scale, width=10).grid(row=2, column=1, padx=5)
+        # Row 4: Pixel Scale and Wavelength
+        ttk.Label(param_frame, text="Pixel Scale (arcsec/pixel):").grid(row=4, column=0, sticky=tk.W, padx=5)
+        ttk.Entry(param_frame, textvariable=self.pixel_scale, width=10).grid(row=4, column=1, padx=5)
 
-        ttk.Label(param_frame, text="Wavelength (nm):").grid(row=2, column=2, sticky=tk.W, padx=5)
-        ttk.Entry(param_frame, textvariable=self.wavelength, width=10).grid(row=2, column=3, padx=5)
+        ttk.Label(param_frame, text="Wavelength (nm):").grid(row=4, column=2, sticky=tk.W, padx=5)
+        ttk.Entry(param_frame, textvariable=self.wavelength, width=10).grid(row=4, column=3, padx=5)
 
         # Filter presets
         filter_frame = ttk.Frame(param_frame)
-        filter_frame.grid(row=3, column=0, columnspan=4, pady=5)
+        filter_frame.grid(row=5, column=0, columnspan=4, pady=5)
         ttk.Label(filter_frame, text="Filter Presets:").pack(side=tk.LEFT, padx=5)
         ttk.Button(filter_frame, text="Sloan r'", command=lambda: self.set_filter(617)).pack(side=tk.LEFT, padx=2)
         ttk.Button(filter_frame, text="Sloan i'", command=lambda: self.set_filter(748)).pack(side=tk.LEFT, padx=2)
@@ -814,12 +845,25 @@ class ContrastCurveGUI:
                         self.log_message(f"Updated pixel scale: {self.pixel_scale.get():.4f}")
                         break
 
-                telescope = self.header.get('TELESCOP', 'Unknown')
-                object_name = self.header.get('OBJECT', 'Unknown')
+                telescope = self.header.get('TELESCOP', self.telescope_name.get())
+                object_name = self.header.get('OBJECT', '')
+                if object_name:
+                    self.target_name.set(object_name)
                 date_obs = self.header.get('DATE-OBS', 'Unknown')
                 self.log_message(f"Telescope: {telescope}")
                 self.log_message(f"Object: {object_name}")
                 self.log_message(f"Date: {date_obs}")
+
+                # Try to extract telescope diameter from header if present
+                if 'TELDIA' in self.header or 'TELDIAM' in self.header:
+                    try:
+                        tel_dia_m = float(self.header.get('TELDIA', self.header.get('TELDIAM', 0)))
+                        if tel_dia_m > 0:
+                            tel_dia_inches = tel_dia_m * 39.3701  # Convert meters to inches
+                            self.telescope_diameter.set(tel_dia_inches)
+                            self.log_message(f"Updated telescope diameter: {tel_dia_inches:.1f} inches")
+                    except:
+                        pass
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load file: {str(e)}")
@@ -836,11 +880,14 @@ class ContrastCurveGUI:
             self.log_message("Using fixed minima magnitude calculation...")
 
             # Create contrast curve generator
+            target = self.target_name.get() if self.target_name.get() else "Unknown Target"
             self.ccg = ContrastCurveGenerator(
                 self.image_data,
                 pixel_scale=self.pixel_scale.get(),
                 wavelength=self.wavelength.get() * 1e-9,
-                telescope_diameter=2.54,
+                telescope_diameter=self.telescope_diameter.get(),  # Now in inches
+                telescope_name=self.telescope_name.get(),
+                target_name=target,
                 header=self.header
             )
 
@@ -895,15 +942,23 @@ def run_gui():
 
 # For command-line usage
 def generate_contrast_curve_cli(fits_file, output_file=None, confidence_level=5.0,
-                               min_radius=2, max_radius=90):
+                                min_radius=2, max_radius=90, telescope_name="Hooker",
+                                telescope_diameter_inches=100.0, target_name=None):
     """Command-line interface for generating contrast curves."""
     print(f"Processing: {fits_file}")
 
     # Load image
     image_data, header = load_speckle_image(fits_file)
 
+    # Get target name from header if not provided
+    if target_name is None:
+        target_name = header.get('OBJECT', 'Unknown Target')
+
     # Create generator
-    ccg = ContrastCurveGenerator(image_data, header=header)
+    ccg = ContrastCurveGenerator(image_data, header=header,
+                                 telescope_name=telescope_name,
+                                 telescope_diameter=telescope_diameter_inches,
+                                 target_name=target_name)
 
     # Generate and plot
     fig = ccg.plot_contrast_curve(
