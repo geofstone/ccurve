@@ -195,15 +195,26 @@ class ContrastCurveGenerator:
         # A pixel is a local minimum if:
         # - It equals the minimum in its neighborhood
         # - It's not also a maximum (to avoid flat regions)
-        # - Its value is below the median of the annulus (to ensure we get actual low points)
-        annulus_values = self.image[annulus_mask]
-        annulus_median = np.median(annulus_values)
-
         is_local_min = (self.image == local_min_map) & annulus_mask & ~is_local_max
+
+        # Special handling for zero regions
+        # Find all zero pixels in the annulus
+        zero_mask = (self.image == 0) & annulus_mask
+
+        # If we have zero regions, sample some of them as minima
+        if np.any(zero_mask):
+            zero_positions = np.where(zero_mask)
+            # Sample every Nth zero pixel to avoid having too many
+            step = max(1, len(zero_positions[0]) // 30)  # Get ~30 samples from zero regions
+            for i in range(0, len(zero_positions[0]), step):
+                is_local_min[zero_positions[0][i], zero_positions[1][i]] = True
 
         # Additionally, sample some points that are simply below median
         # This ensures we get minima even in smooth regions
-        below_median_mask = (self.image < annulus_median) & annulus_mask & ~is_local_max
+        annulus_values = self.image[annulus_mask]
+        annulus_median = np.median(annulus_values[annulus_values > 0]) if np.any(annulus_values > 0) else 0
+
+        below_median_mask = (self.image < annulus_median) & (self.image > 0) & annulus_mask & ~is_local_max
 
         # Systematically sample some below-median points if we don't have enough minima
         n_local_min = np.sum(is_local_min)
@@ -270,8 +281,8 @@ class ContrastCurveGenerator:
         annulus_centers.append(0)
         detection_limits.append(self.star_flux)  # At r=0, detection limit is the star flux itself
 
-        # Process each annulus with smaller width for smoother curve
-        annulus_width = 2  # Width of each annulus
+        # Process each annulus with wider annuli for better statistics
+        annulus_width = 3  # Increased width for smoother statistics
         for radius in range(min_radius, max_radius, radius_step):
             inner_r = max(0, radius - annulus_width / 2)  # Ensure inner radius doesn't go negative
             outer_r = radius + annulus_width / 2
@@ -319,12 +330,21 @@ class ContrastCurveGenerator:
         self.annulus_centers = np.array(annulus_centers)
         self.detection_limits = np.array(detection_limits)
 
-        # Smooth the detection limit curve slightly for better appearance
+        # Smooth the detection limit curve for better appearance
         # Skip the first point (at origin) when smoothing
         if len(self.detection_limits) > 5:
             from scipy.ndimage import gaussian_filter1d
-            smoothed = gaussian_filter1d(self.detection_limits[1:], sigma=1.5)
-            self.detection_limits[1:] = smoothed
+            from scipy.interpolate import UnivariateSpline
+
+            # First apply Gaussian smoothing
+            smoothed = gaussian_filter1d(self.detection_limits[1:], sigma=3.0)
+
+            # Then apply spline smoothing for extra smoothness
+            # Create a spline interpolation (s parameter controls smoothness)
+            spline = UnivariateSpline(self.annulus_centers[1:], smoothed, s=0.5)
+
+            # Evaluate the spline at the original points
+            self.detection_limits[1:] = spline(self.annulus_centers[1:])
 
         print(f"Found {len(all_maxima)} local maxima and {len(all_minima)} local minima")
         print(f"Processed {len(annulus_centers)} annuli")
@@ -379,29 +399,51 @@ class ContrastCurveGenerator:
         # Plot detection limit curve with thicker red line
         ax.plot(radii * self.pixel_scale, limits_delta_mag, 'r-', linewidth=2.5)
 
-        # Find the deepest point in the curve (likely a companion detection)
-        # Skip the origin point when looking for minima
-        min_idx = np.argmin(limits_delta_mag[1:]) + 1
-        min_sep = radii[min_idx] * self.pixel_scale
-        min_limit = limits_delta_mag[min_idx]
+        # Find actual detections - maxima that fall BELOW the detection limit curve
+        # Interpolate the detection limit at each maximum's position
+        limit_interp = np.interp(self.all_radii_max * self.pixel_scale,
+                                 radii * self.pixel_scale,
+                                 limits_delta_mag)
 
-        # Add annotations similar to the example
-        # Annotate the limiting delta magnitude at the dip
-        ax.annotate(f'Limiting Δm = {min_limit:.2f}',
-                    xy=(min_sep, min_limit),
-                    xytext=(min_sep - 0.05, min_limit + 0.5),
-                    fontsize=11, ha='center')
+        # Detections are where maxima are below the limit (smaller delta mag = brighter)
+        detections = maxima_delta_mag < limit_interp
 
-        # Find another point to annotate (e.g., at a different separation)
-        other_idx = len(radii) // 3  # Pick a point about 1/3 of the way
-        if other_idx > 0:
-            other_sep = radii[other_idx] * self.pixel_scale
-            other_limit = limits_delta_mag[other_idx]
+        if np.any(detections):
+            detection_seps = self.all_radii_max[detections] * self.pixel_scale
+            detection_mags = maxima_delta_mag[detections]
 
-            ax.annotate(f'Limiting Δm = {other_limit:.2f}',
-                        xy=(other_sep, other_limit),
-                        xytext=(other_sep - 0.05, other_limit - 0.5),
-                        fontsize=11, ha='center')
+            # Find the most significant detections to annotate
+            # Sort by how far below the detection limit they are
+            significance = limit_interp[detections] - detection_mags
+            sorted_indices = np.argsort(significance)[::-1]  # Most significant first
+
+            # Annotate up to 2 most significant detections
+            n_annotations = min(2, len(sorted_indices))
+
+            for i in range(n_annotations):
+                idx = sorted_indices[i]
+                sep = detection_seps[idx]
+                mag = detection_mags[idx]
+
+                # Get the limiting magnitude at this separation
+                limiting_mag = np.interp(sep, radii * self.pixel_scale, limits_delta_mag)
+
+                # Position annotation
+                if i == 0:  # First detection
+                    # Annotate with arrow pointing to the detection
+                    ax.annotate(f'Limiting Δm = {limiting_mag:.2f}',
+                                xy=(sep, mag),  # Point to the actual detection
+                                xytext=(sep + 0.05, mag + 0.8),
+                                arrowprops=dict(arrowstyle='->', color='black', lw=0.5),
+                                fontsize=11, ha='left')
+                else:  # Second detection
+                    # Position differently to avoid overlap
+                    ax.annotate(f'Limiting Δm = {limiting_mag:.2f}',
+                                xy=(sep, mag),
+                                xytext=(sep - 0.1, mag - 0.8),
+                                fontsize=11, ha='center')
+
+            print(f"Found {np.sum(detections)} detections below the detection limit")
 
         # Formatting to match example
         ax.set_xlabel('Separation [arcsec]', fontsize=13)
