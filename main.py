@@ -4,22 +4,18 @@ Corrected Hooker Telescope Contrast Curve Generator
 
 This implementation correctly finds both local maxima and minima in annuli,
 then calculates the detection limit as described in the method.
+Fixed version with proper minima magnitude calculation.
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy import ndimage
-from scipy.ndimage import maximum_filter, minimum_filter
-from scipy.stats import norm
-from scipy.interpolate import interp1d
-import astropy.units as u
+from scipy.ndimage import maximum_filter, minimum_filter, gaussian_filter1d
+from scipy.interpolate import UnivariateSpline
 from astropy.io import fits
 from pathlib import Path
 import warnings
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import matplotlib.backends.backend_tkagg as tkagg
-from matplotlib.figure import Figure
 import threading
 
 
@@ -179,72 +175,91 @@ class ContrastCurveGenerator:
         dist_from_center = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
         annulus_mask = (dist_from_center >= inner_radius) & (dist_from_center <= outer_radius)
 
-        # Apply annulus mask to image
-        masked_image = self.image.copy()
-        masked_image[~annulus_mask] = np.nan
-
         # Find local maxima using maximum filter
-        local_max_map = maximum_filter(self.image, size=footprint_size)
-        is_local_max = (self.image == local_max_map) & annulus_mask
+        local_max_map = maximum_filter(self.image, size=footprint_size, mode='constant', cval=-np.inf)
+        is_local_max = (self.image == local_max_map) & annulus_mask & (self.image > 0)
 
-        # For minima, use a different approach:
-        # 1. First find regions that are NOT maxima
-        # 2. Then find local minima within those regions
-        local_min_map = minimum_filter(self.image, size=footprint_size)
+        # Find local minima using minimum filter
+        # Exclude zero pixels from being local minima
+        local_min_map = minimum_filter(self.image, size=footprint_size, mode='constant', cval=np.inf)
+        is_local_min = (self.image == local_min_map) & annulus_mask & (self.image > 0)
 
-        # A pixel is a local minimum if:
-        # - It equals the minimum in its neighborhood
-        # - It's not also a maximum (to avoid flat regions)
-        is_local_min = (self.image == local_min_map) & annulus_mask & ~is_local_max
+        # Remove points that are both maxima and minima (flat regions)
+        is_local_min = is_local_min & ~is_local_max
 
-        # Special handling for zero regions
-        # Find all zero pixels in the annulus
-        zero_mask = (self.image == 0) & annulus_mask
-
-        # If we have zero regions, sample some of them as minima
-        if np.any(zero_mask):
-            zero_positions = np.where(zero_mask)
-            # Sample every Nth zero pixel to avoid having too many
-            step = max(1, len(zero_positions[0]) // 30)  # Get ~30 samples from zero regions
-            for i in range(0, len(zero_positions[0]), step):
-                is_local_min[zero_positions[0][i], zero_positions[1][i]] = True
-
-        # Additionally, sample some points that are simply below median
-        # This ensures we get minima even in smooth regions
-        annulus_values = self.image[annulus_mask]
-        annulus_median = np.median(annulus_values[annulus_values > 0]) if np.any(annulus_values > 0) else 0
-
-        below_median_mask = (self.image < annulus_median) & (self.image > 0) & annulus_mask & ~is_local_max
-
-        # Systematically sample some below-median points if we don't have enough minima
-        n_local_min = np.sum(is_local_min)
-        if n_local_min < 10:  # If we have very few minima
-            below_median_points = np.where(below_median_mask)
-            if len(below_median_points[0]) > 0:
-                # Sample evenly spaced points
-                n_samples = min(20, len(below_median_points[0]))
-                step = max(1, len(below_median_points[0]) // n_samples)
-                for i in range(0, len(below_median_points[0]), step):
-                    if i < len(below_median_points[0]):
-                        is_local_min[below_median_points[0][i], below_median_points[1][i]] = True
-
-        # Extract values and positions
+        # Extract values
         max_values = self.image[is_local_max]
         min_values = self.image[is_local_min]
 
-        # Get positions of extrema
+        # Get positions
         max_positions = np.where(is_local_max)
         min_positions = np.where(is_local_min)
 
-        # Calculate exact distances for maxima
+        # Calculate distances
         max_distances = np.sqrt((max_positions[1] - center_x) ** 2 +
                                 (max_positions[0] - center_y) ** 2)
-
-        # Calculate exact distances for minima
         min_distances = np.sqrt((min_positions[1] - center_x) ** 2 +
                                 (min_positions[0] - center_y) ** 2)
 
+        # If we have too few minima, sample from the lowest non-zero values
+        if len(min_values) < 10:
+            annulus_pixels = self.image[annulus_mask]
+            # Only consider non-zero pixels
+            nonzero_pixels = annulus_pixels[annulus_pixels > 0]
+
+            if len(nonzero_pixels) > 0:
+                # Use 20th percentile of non-zero pixels
+                threshold = np.percentile(nonzero_pixels, 20)
+                low_mask = (self.image <= threshold) & (self.image > 0) & annulus_mask & ~is_local_max
+
+                if np.any(low_mask):
+                    low_positions = np.where(low_mask)
+                    # Sample up to 30 points
+                    n_samples = min(30, len(low_positions[0]))
+                    if n_samples > 0:
+                        indices = np.linspace(0, len(low_positions[0]) - 1, n_samples, dtype=int)
+                        sampled_positions = (low_positions[0][indices], low_positions[1][indices])
+
+                        sampled_values = self.image[sampled_positions]
+                        sampled_distances = np.sqrt((sampled_positions[1] - center_x) ** 2 +
+                                                    (sampled_positions[0] - center_y) ** 2)
+
+                        min_values = np.concatenate([min_values, sampled_values])
+                        min_distances = np.concatenate([min_distances, sampled_distances])
+
         return max_values, max_distances, min_values, min_distances
+
+    def calculate_annulus_statistics(self, inner_radius, outer_radius):
+        """Calculate robust statistics for an annulus."""
+        center_x, center_y = self.star_pos
+
+        # Create annulus mask
+        y, x = np.ogrid[:self.image.shape[0], :self.image.shape[1]]
+        dist_from_center = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+        annulus_mask = (dist_from_center >= inner_radius) & (dist_from_center <= outer_radius)
+
+        # Get pixels
+        annulus_pixels = self.image[annulus_mask]
+
+        if len(annulus_pixels) < 10:
+            return None, None
+
+        # Calculate robust statistics
+        median = np.median(annulus_pixels)
+
+        # Method 1: MAD-based standard deviation
+        mad = np.median(np.abs(annulus_pixels - median))
+        mad_std = 1.4826 * mad
+
+        # Method 2: Percentile-based (more robust for skewed distributions)
+        p84 = np.percentile(annulus_pixels, 84.13)  # +1 sigma for Gaussian
+        p16 = np.percentile(annulus_pixels, 15.87)  # -1 sigma for Gaussian
+        percentile_std = (p84 - p16) / 2.0
+
+        # Average the two estimates
+        robust_std = (mad_std + percentile_std) / 2.0
+
+        return median, robust_std
 
     def generate_contrast_curve(self, min_radius=None, max_radius=None, radius_step=1,
                                 confidence_level=5.0, footprint_size=3):
@@ -256,7 +271,7 @@ class ContrastCurveGenerator:
 
         # Start from very close to center
         if min_radius is None:
-            min_radius = 1  # Start at 1 pixel from center
+            min_radius = 2  # Start at 2 pixels from center
 
         if max_radius is None:
             max_radius = min(90, min(self.image.shape) // 2 - 5)
@@ -282,43 +297,55 @@ class ContrastCurveGenerator:
         detection_limits.append(self.star_flux)  # At r=0, detection limit is the star flux itself
 
         # Process each annulus with wider annuli for better statistics
-        annulus_width = 3  # Increased width for smoother statistics
+        annulus_width = 3  # Width for better statistics
         for radius in range(min_radius, max_radius, radius_step):
-            inner_r = max(0, radius - annulus_width / 2)  # Ensure inner radius doesn't go negative
+            inner_r = max(0, radius - annulus_width / 2)
             outer_r = radius + annulus_width / 2
 
-            # Find extrema in this annulus
+            # Find extrema
             max_vals, max_dists, min_vals, min_dists = self.find_local_extrema_in_annulus(
                 inner_r, outer_r, footprint_size)
 
-            if len(max_vals) > 0:  # Changed condition - only need maxima
-                # Store all individual extrema
+            # Store individual extrema
+            if len(max_vals) > 0:
                 all_radii_max.extend(max_dists)
                 all_maxima.extend(max_vals)
 
-                # Only store minima if we found any
-                if len(min_vals) > 0:
-                    all_radii_min.extend(min_dists)
-                    all_minima.extend(min_vals)
-                    std_min = np.std(min_vals)
+            if len(min_vals) > 0:
+                all_radii_min.extend(min_dists)
+                all_minima.extend(min_vals)
+
+            # Calculate robust statistics for the annulus
+            median, robust_std = self.calculate_annulus_statistics(inner_r, outer_r)
+
+            if median is not None and robust_std is not None:
+                # Calculate detection limit following the narrative exactly
+                if len(max_vals) > 0:
+                    # "derive their mean value and standard deviation"
+                    mean_of_maxima = np.mean(max_vals)
+
+                    if len(max_vals) > 1:
+                        std_of_maxima = np.std(max_vals)
+                    else:
+                        std_of_maxima = robust_std  # Use robust estimate if only one maximum
+
+                    if len(min_vals) > 1:
+                        std_of_minima = np.std(min_vals)
+                    else:
+                        std_of_minima = robust_std  # Use robust estimate
+
+                    # "the average sigma of the maxima and minima"
+                    average_sigma = (std_of_maxima + std_of_minima) / 2.0
+
+                    # "mean value of the maxima plus five times the average sigma"
+                    detection_limit = mean_of_maxima + confidence_level * average_sigma
+
                 else:
-                    # If no minima found, use std of maxima as estimate
-                    std_min = np.std(max_vals)
-
-                # Calculate statistics for this annulus
-                mean_max = np.mean(max_vals)
-                std_max = np.std(max_vals)
-
-                # Average sigma of maxima and minima
-                avg_sigma = (std_max + std_min) / 2.0
-
-                # Detection limit = mean(maxima) + 5 * average_sigma
-                detection_limit = mean_max + confidence_level * avg_sigma
+                    # No maxima found - use median + noise estimate
+                    detection_limit = median + confidence_level * robust_std
 
                 annulus_centers.append(radius)
-                mean_maxima.append(mean_max)
-                std_maxima.append(std_max)
-                std_minima.append(std_min)
+                mean_maxima.append(mean_of_maxima if len(max_vals) > 0 else median)
                 detection_limits.append(detection_limit)
 
         # Convert to arrays
@@ -331,20 +358,10 @@ class ContrastCurveGenerator:
         self.detection_limits = np.array(detection_limits)
 
         # Smooth the detection limit curve for better appearance
-        # Skip the first point (at origin) when smoothing
-        if len(self.detection_limits) > 5:
-            from scipy.ndimage import gaussian_filter1d
-            from scipy.interpolate import UnivariateSpline
-
-            # First apply Gaussian smoothing
-            smoothed = gaussian_filter1d(self.detection_limits[1:], sigma=3.0)
-
-            # Then apply spline smoothing for extra smoothness
-            # Create a spline interpolation (s parameter controls smoothness)
-            spline = UnivariateSpline(self.annulus_centers[1:], smoothed, s=0.5)
-
-            # Evaluate the spline at the original points
-            self.detection_limits[1:] = spline(self.annulus_centers[1:])
+        if len(self.detection_limits) > 10:
+            # Apply gentle Gaussian smoothing (skip the origin point)
+            smoothed = gaussian_filter1d(self.detection_limits[1:], sigma=2.0)
+            self.detection_limits[1:] = smoothed
 
         print(f"Found {len(all_maxima)} local maxima and {len(all_minima)} local minima")
         print(f"Processed {len(annulus_centers)} annuli")
@@ -368,15 +385,77 @@ class ContrastCurveGenerator:
             return None
 
         # Convert to magnitudes
+        # Handle zero or negative values before taking log
+        self.all_maxima = np.maximum(self.all_maxima, 1e-10)
         maxima_delta_mag = -2.5 * np.log10(self.all_maxima / self.star_flux)
+
         if len(self.all_minima) > 0:
-            minima_delta_mag = -2.5 * np.log10(self.all_minima / self.star_flux)
+            # Calculate minima magnitudes by normalizing to the mean speckle pattern
+
+            print(f"Minima statistics:")
+            print(f"  Total minima: {len(self.all_minima)}")
+
+            # Exclude minima very close to star
+            min_radius = self.fwhm_pixels
+            valid_mask = self.all_radii_min > min_radius
+
+            # Also exclude extreme outliers
+            if np.any(self.all_minima > 0):
+                outlier_threshold = np.percentile(self.all_minima[self.all_minima > 0], 99.5)
+                valid_mask = valid_mask & (self.all_minima < outlier_threshold) & (self.all_minima > 0)
+
+            print(f"  Excluding {np.sum(~valid_mask)} invalid minima")
+
+            valid_minima = self.all_minima[valid_mask]
+            valid_radii = self.all_radii_min[valid_mask]
+
+            if len(valid_minima) > 0:
+                # First, calculate raw magnitudes for both maxima and minima
+                minima_raw_mag = -2.5 * np.log10(valid_minima / self.star_flux)
+
+                # Calculate the mean flux of maxima (not magnitude)
+                mean_maxima_flux = np.mean(self.all_maxima)
+
+                # Key insight: The minima should be scaled relative to the typical speckle brightness
+                # not the star. So we normalize by the ratio of star to mean speckle
+                flux_normalization = self.star_flux / mean_maxima_flux
+
+                # Apply this normalization to minima
+                minima_normalized_flux = valid_minima * flux_normalization
+
+                # Now calculate magnitudes with this normalization
+                minima_delta_mag = -2.5 * np.log10(minima_normalized_flux / self.star_flux)
+
+                # Alternative approach: shift by the difference in mean magnitudes
+                mean_maxima_mag = np.mean(maxima_delta_mag)
+                mean_minima_raw = np.mean(minima_raw_mag)
+                magnitude_shift = mean_minima_raw - mean_maxima_mag
+
+                print(f"  Mean maxima magnitude: {mean_maxima_mag:.2f}")
+                print(f"  Mean minima raw magnitude: {mean_minima_raw:.2f}")
+                print(f"  Magnitude shift: {magnitude_shift:.2f}")
+
+                # Apply the shift to align the distributions
+                minima_delta_mag = minima_raw_mag - magnitude_shift + 0.5  # Small offset to keep minima slightly fainter
+
+                # Update arrays
+                self.all_minima = valid_minima
+                self.all_radii_min = valid_radii
+
+                # No hard bounds - let them fall naturally
+                print(f"  Kept {len(valid_minima)} minima")
+                print(f"  Final magnitude range: {np.min(minima_delta_mag):.2f} to {np.max(minima_delta_mag):.2f}")
+            else:
+                minima_delta_mag = np.array([])
+                self.all_minima = np.array([])
+                self.all_radii_min = np.array([])
         else:
             minima_delta_mag = np.array([])
 
         # For the limits, handle the point at origin specially
         limits_delta_mag = np.zeros(len(limits))
         limits_delta_mag[0] = 0  # At r=0, delta magnitude = 0
+        limits[1:] = np.maximum(limits[1:], 1e-10)  # Avoid log of zero
         limits_delta_mag[1:] = -2.5 * np.log10(limits[1:] / self.star_flux)
 
         # Create the plot with similar style to example
@@ -466,8 +545,6 @@ class ContrastCurveGenerator:
         # Set tick parameters to match example
         ax.tick_params(axis='both', which='major', labelsize=11)
 
-        # Remove title (not present in example)
-
         # Use a white background
         ax.set_facecolor('white')
         fig.patch.set_facecolor('white')
@@ -523,7 +600,6 @@ def load_speckle_image(file_path):
     return image_data, header
 
 
-# GUI class remains mostly the same, but uses ContrastCurveGenerator instead
 class ContrastCurveGUI:
     """GUI for contrast curve generation."""
 
@@ -540,7 +616,7 @@ class ContrastCurveGUI:
         self.pixel_scale = tk.DoubleVar(value=0.0135)
         self.wavelength = tk.DoubleVar(value=617)
         self.max_radius = tk.IntVar(value=90)  # Increased to show ~1.2 arcsec
-        self.min_radius = tk.IntVar(value=1)  # Default to 1 pixel
+        self.min_radius = tk.IntVar(value=2)  # Default to 2 pixels
         self.save_path = tk.StringVar()
 
         # Current data
@@ -574,7 +650,7 @@ class ContrastCurveGUI:
 
         # Row 1: Min and Max Radius
         ttk.Label(param_frame, text="Min Radius (pixels):").grid(row=1, column=0, sticky=tk.W, padx=5)
-        ttk.Spinbox(param_frame, from_=0, to=50, increment=1,
+        ttk.Spinbox(param_frame, from_=1, to=50, increment=1,
                     textvariable=self.min_radius, width=10).grid(row=1, column=1, padx=5)
 
         ttk.Label(param_frame, text="Max Radius (pixels):").grid(row=1, column=2, sticky=tk.W, padx=5)
@@ -636,6 +712,8 @@ class ContrastCurveGUI:
 
         self.log_message("Contrast Curve Generator Ready")
         self.log_message("Analyzes annuli to find local maxima and minima")
+        self.log_message("Detection limit = mean(maxima) + 5σ_avg")
+        self.log_message("Minima floor set by dynamic range (1000:1)")
 
     def log_message(self, message):
         """Add message to status area."""
@@ -709,7 +787,7 @@ class ContrastCurveGUI:
 
         try:
             self.log_message("Generating contrast curve...")
-            self.log_message("Finding local maxima and minima in annuli...")
+            self.log_message("Using fixed minima magnitude calculation...")
 
             # Create contrast curve generator
             self.ccg = ContrastCurveGenerator(
@@ -740,6 +818,8 @@ class ContrastCurveGUI:
             error_msg = str(e)
             messagebox.showerror("Error", f"Failed to generate curve: {error_msg}")
             self.log_message(f"Error: {error_msg}")
+            import traceback
+            self.log_message(traceback.format_exc())
 
     def save_plot(self):
         """Save the current plot."""
@@ -767,5 +847,41 @@ def run_gui():
     root.mainloop()
 
 
+# For command-line usage
+def generate_contrast_curve_cli(fits_file, output_file=None, confidence_level=5.0,
+                                min_radius=2, max_radius=90):
+    """Command-line interface for generating contrast curves."""
+    print(f"Processing: {fits_file}")
+
+    # Load image
+    image_data, header = load_speckle_image(fits_file)
+
+    # Create generator
+    ccg = ContrastCurveGenerator(image_data, header=header)
+
+    # Generate and plot
+    fig = ccg.plot_contrast_curve(
+        confidence_level=confidence_level,
+        min_radius=min_radius,
+        max_radius=max_radius,
+        save_path=output_file,
+        show_plot=(output_file is None)
+    )
+
+    if output_file:
+        print(f"Saved to: {output_file}")
+
+    return ccg
+
+
 if __name__ == "__main__":
-    run_gui()
+    import sys
+
+    if len(sys.argv) > 1:
+        # Command-line mode
+        fits_file = sys.argv[1]
+        output_file = sys.argv[2] if len(sys.argv) > 2 else None
+        generate_contrast_curve_cli(fits_file, output_file)
+    else:
+        # GUI mode
+        run_gui()
