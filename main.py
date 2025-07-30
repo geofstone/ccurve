@@ -1,13 +1,18 @@
 """
-Final Contrast Curve Generator - Correct Method with Full Annotations
-====================================================================
+Complete Final Contrast Curve Generator with All Features
+=========================================================
 
-Uses the paper method that was working correctly, with all plot annotations restored.
+Final version with:
+- Paper method for detection limits
+- Robust FITS header handling
+- Peak delta-magnitude annotation (closest to nearest detection)
+- All original plot details
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.ndimage import maximum_filter, minimum_filter, gaussian_filter1d
+from scipy.signal import find_peaks
 from astropy.io import fits
 from pathlib import Path
 import warnings
@@ -354,6 +359,56 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
     ax.plot(radii, limits, 'r-', linewidth=2.5,
             label=f'{confidence_level}σ Detection Limit')
 
+    # Find and annotate the peak delta-magnitude closest to the nearest detection
+    if len(limits) > 10:  # Need enough points
+        # First, check if we have any detections to reference
+        peak_idx = None
+        peak_sep = None
+        peak_limit = None
+
+        # Find detections (maxima below the limit curve)
+        if len(max_seps) > 0:
+            limit_at_max = np.interp(max_seps, radii, limits)
+            detections = max_mags < limit_at_max
+
+            if np.any(detections):
+                # Find the detection with smallest separation
+                det_seps = max_seps[detections]
+                closest_detection_sep = np.min(det_seps)
+
+                # Find all local maxima in the detection limit curve (skip origin)
+                peaks, _ = find_peaks(limits[1:])  # Skip origin point
+                peaks = peaks + 1  # Adjust indices to account for skipped origin
+
+                if len(peaks) > 0:
+                    # Find the peak closest to the closest detection
+                    peak_distances_to_detection = np.abs(radii[peaks] - closest_detection_sep)
+                    closest_peak_idx = np.argmin(peak_distances_to_detection)
+                    peak_idx = peaks[closest_peak_idx]
+                else:
+                    # No local maxima found, use global maximum (skip origin)
+                    peak_idx = np.argmax(limits[1:]) + 1
+
+        # If no detections found, just use the global maximum (skip origin)
+        if peak_idx is None:
+            peak_idx = np.argmax(limits[1:]) + 1
+
+        peak_sep = radii[peak_idx]
+        peak_limit = limits[peak_idx]
+
+        # Convert to pixels for annotation
+        peak_sep_pixels = peak_sep / results['pixel_scale']
+
+        # Annotate the peak delta-magnitude point
+        annotation_text = (f'Peak Δm:\n' +
+                           f'Δm = {peak_limit:.1f} at {peak_sep:.2f}" ({peak_sep_pixels:.0f} pix)')
+        ax.annotate(annotation_text,
+                    xy=(peak_sep, peak_limit),
+                    xytext=(peak_sep - 0.15, peak_limit - 2.0),  # Move annotation farther away
+                    arrowprops=dict(arrowstyle='->', color='red', lw=1),
+                    fontsize=10, ha='left',
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='lightblue', alpha=0.8))
+
     # Find and highlight detections (maxima below the limit)
     if len(max_seps) > 0:
         # Interpolate limit at maxima positions
@@ -384,7 +439,7 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
                                    f'Separation = {sep:.3f}" ({sep_pixels:.1f} pix)')
                 ax.annotate(annotation_text,
                             xy=(sep, mag),
-                            xytext=(sep + 0.05, mag + 0.8),
+                            xytext=(sep + 0.15, mag + 1.5),  # Move annotation farther away
                             arrowprops=dict(arrowstyle='->', color='black', lw=0.5),
                             fontsize=10, ha='left',
                             bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
