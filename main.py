@@ -232,7 +232,7 @@ def calculate_contrast_curve_paper_method(image, pixel_scale=0.0135, min_radius=
     # Smooth detection limits curve
     if len(detection_limits) > 10:
         # Apply smoothing (skip origin)
-        smoothed = gaussian_filter1d(detection_limits[1:], sigma=2.0)
+        smoothed = gaussian_filter1d(detection_limits[1:], sigma=2.5)
         detection_limits[1:] = smoothed
 
     # Convert to magnitudes
@@ -510,7 +510,7 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
     info_text.append(f'Target: {title}')
     info_text.append(f'Telescope: {telescope_name} {telescope_diameter:.2f}m')
     info_text.append(f'Wavelength: {wavelength * 1e9:.0f} nm')
-    info_text.append(f'Pixel scale: {results["pixel_scale"] * 1000:.1f} mas/pixel')
+    info_text.append(f'Pixel scale: {results["pixel_scale"]:.4f}"/pix ({results["pixel_scale"] * 1000:.1f} mas/pix)')
     info_text.append(f'PSF FWHM: {results["fwhm_arcsec"]:.3f}" ({results["fwhm_pixels"]:.1f} pix)')
     info_text.append(
         f'λ/D: {results["lambda_over_d"]:.3f}" ({results["lambda_over_d"] / results["pixel_scale"]:.1f} pix)')
