@@ -357,6 +357,9 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
                              save_path=None, show_plot=True, date_obs=None):
     """Plot contrast curve with full annotations."""
 
+    # Close any existing figures to prevent data persistence
+    plt.close('all')
+
     # Extract results
     max_seps = results['max_seps']
     max_mags = results['max_mags']
@@ -530,7 +533,7 @@ class FinalContrastCurveGUI:
         self.wavelength = tk.DoubleVar(value=617)
         self.telescope_name = tk.StringVar(value="Hooker")
         self.telescope_diameter = tk.DoubleVar(value=100.0)  # inches
-        self.max_radius = tk.IntVar(value=90)
+        self.max_radius = tk.IntVar(value=50)
         self.min_radius = tk.IntVar(value=2)
         self.save_path = tk.StringVar()
 
@@ -696,6 +699,9 @@ class FinalContrastCurveGUI:
 
         try:
             self.log_status("\nGenerating contrast curve...")
+
+            # Close any existing figures to prevent data persistence
+            plt.close('all')
 
             # Calculate curve
             telescope_diameter_m = self.telescope_diameter.get() * 0.0254  # inches to meters
