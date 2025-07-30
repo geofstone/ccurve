@@ -172,7 +172,7 @@ class ContrastCurveGenerator:
         y, x = np.ogrid[:self.image.shape[0], :self.image.shape[1]]
 
         # Create annulus mask
-        dist_from_center = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+        dist_from_center = np.sqrt((x - center_x)**2 + (y - center_y)**2)
         annulus_mask = (dist_from_center >= inner_radius) & (dist_from_center <= outer_radius)
 
         # Find local maxima using maximum filter
@@ -196,10 +196,10 @@ class ContrastCurveGenerator:
         min_positions = np.where(is_local_min)
 
         # Calculate distances
-        max_distances = np.sqrt((max_positions[1] - center_x) ** 2 +
-                                (max_positions[0] - center_y) ** 2)
-        min_distances = np.sqrt((min_positions[1] - center_x) ** 2 +
-                                (min_positions[0] - center_y) ** 2)
+        max_distances = np.sqrt((max_positions[1] - center_x)**2 +
+                               (max_positions[0] - center_y)**2)
+        min_distances = np.sqrt((min_positions[1] - center_x)**2 +
+                               (min_positions[0] - center_y)**2)
 
         # If we have too few minima, sample from the lowest non-zero values
         if len(min_values) < 10:
@@ -217,12 +217,12 @@ class ContrastCurveGenerator:
                     # Sample up to 30 points
                     n_samples = min(30, len(low_positions[0]))
                     if n_samples > 0:
-                        indices = np.linspace(0, len(low_positions[0]) - 1, n_samples, dtype=int)
+                        indices = np.linspace(0, len(low_positions[0])-1, n_samples, dtype=int)
                         sampled_positions = (low_positions[0][indices], low_positions[1][indices])
 
                         sampled_values = self.image[sampled_positions]
-                        sampled_distances = np.sqrt((sampled_positions[1] - center_x) ** 2 +
-                                                    (sampled_positions[0] - center_y) ** 2)
+                        sampled_distances = np.sqrt((sampled_positions[1] - center_x)**2 +
+                                                  (sampled_positions[0] - center_y)**2)
 
                         min_values = np.concatenate([min_values, sampled_values])
                         min_distances = np.concatenate([min_distances, sampled_distances])
@@ -235,7 +235,7 @@ class ContrastCurveGenerator:
 
         # Create annulus mask
         y, x = np.ogrid[:self.image.shape[0], :self.image.shape[1]]
-        dist_from_center = np.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+        dist_from_center = np.sqrt((x - center_x)**2 + (y - center_y)**2)
         annulus_mask = (dist_from_center >= inner_radius) & (dist_from_center <= outer_radius)
 
         # Get pixels
@@ -528,6 +528,18 @@ class ContrastCurveGenerator:
         ax.set_xlabel('Separation [arcsec]', fontsize=13)
         ax.set_ylabel('Magnitude Difference', fontsize=13)
 
+        # Add secondary x-axis for pixels
+        ax2 = ax.twiny()
+        ax2.set_xlabel('Separation [pixels]', fontsize=13)
+
+        # Set the pixel axis limits to match the arcsec axis
+        x_min, x_max = ax.get_xlim()
+        ax2.set_xlim(x_min / self.pixel_scale, x_max / self.pixel_scale)
+
+        # Make sure the pixel axis ticks are at nice round numbers
+        pixel_ticks = np.arange(0, x_max / self.pixel_scale + 10, 10)
+        ax2.set_xticks(pixel_ticks)
+
         # Legend in upper right like example
         ax.legend(fontsize=10, loc='upper right', frameon=True, fancybox=False)
 
@@ -544,6 +556,40 @@ class ContrastCurveGenerator:
 
         # Set tick parameters to match example
         ax.tick_params(axis='both', which='major', labelsize=11)
+        ax2.tick_params(axis='both', which='major', labelsize=11)
+
+        # Add information box in lower right
+        info_text = []
+        info_text.append(f'Telescope: Hooker 2.54m')
+        info_text.append(f'Wavelength: {self.wavelength * 1e9:.0f} nm')
+        info_text.append(f'Pixel scale: {self.pixel_scale * 1000:.1f} mas/pixel')
+        info_text.append(f'PSF FWHM: {self.fwhm_arcsec:.3f}" ({self.fwhm_pixels:.1f} pix)')
+        info_text.append(f'λ/D: {self.lambda_over_d:.3f}" ({self.lambda_over_d / self.pixel_scale:.1f} pix)')
+        info_text.append(f'Confidence: {confidence_level}σ')
+
+        # Extract object name from header if available
+        if hasattr(self, 'header') and self.header:
+            object_name = self.header.get('OBJECT', 'Unknown')
+            date_obs = self.header.get('DATE-OBS', 'Unknown')
+            if object_name != 'Unknown':
+                info_text.append(f'Object: {object_name}')
+            if date_obs != 'Unknown':
+                # Try to format date nicely
+                try:
+                    if 'T' in date_obs:
+                        date_part = date_obs.split('T')[0]
+                    else:
+                        date_part = date_obs
+                    info_text.append(f'Date: {date_part}')
+                except:
+                    info_text.append(f'Date: {date_obs}')
+
+        # Create the text box
+        info_str = '\n'.join(info_text)
+        ax.text(0.98, 0.02, info_str, transform=ax.transAxes,
+                fontsize=9, verticalalignment='bottom', horizontalalignment='right',
+                bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
+                         edgecolor='gray', alpha=0.9))
 
         # Use a white background
         ax.set_facecolor('white')
@@ -849,7 +895,7 @@ def run_gui():
 
 # For command-line usage
 def generate_contrast_curve_cli(fits_file, output_file=None, confidence_level=5.0,
-                                min_radius=2, max_radius=90):
+                               min_radius=2, max_radius=90):
     """Command-line interface for generating contrast curves."""
     print(f"Processing: {fits_file}")
 
