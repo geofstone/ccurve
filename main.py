@@ -1,12 +1,8 @@
 """
-Complete Final Contrast Curve Generator with All Features
-=========================================================
+Complete Final Contrast Curve Generator with Debugging for Minima
+================================================================
 
-Final version with:
-- Paper method for detection limits
-- Robust FITS header handling
-- Peak delta-magnitude annotation (closest to nearest detection)
-- All original plot details
+Modified version with extensive debugging output to diagnose minima issues
 """
 
 import numpy as np
@@ -145,6 +141,14 @@ def calculate_contrast_curve_paper_method(image, pixel_scale=0.0135, min_radius=
     print(f"Dynamic range: {dynamic_range:.1f}")
     print(f"PSF FWHM: {fwhm_pixels:.2f} pixels ({fwhm_arcsec:.3f} arcsec)")
 
+    # ===== NEW DEBUGGING INFO =====
+    print(f"\n=== Image Statistics ===")
+    print(f"Image min value: {np.min(image):.2e}")
+    print(f"Image max value: {np.max(image):.2e}")
+    print(f"Image mean: {np.mean(image):.2e}")
+    print(f"Background (darkest corner median): {background:.2e}")
+    print(f"Any negative values in image? {np.any(image < 0)}")
+
     # Storage for all extrema (for plotting)
     all_max_separations = []
     all_max_values = []
@@ -235,6 +239,22 @@ def calculate_contrast_curve_paper_method(image, pixel_scale=0.0135, min_radius=
         smoothed = gaussian_filter1d(detection_limits[1:], sigma=2.5)
         detection_limits[1:] = smoothed
 
+    # ===== NEW DEBUGGING INFO FOR EXTREMA =====
+    print(f"\n=== Extrema Value Statistics ===")
+    print(f"Total maxima found: {len(all_max_values)}")
+    if len(all_max_values) > 0:
+        print(f"Maxima value range: {np.min(all_max_values):.2e} to {np.max(all_max_values):.2e}")
+        print(f"Maxima mean: {np.mean(all_max_values):.2e}")
+        print(f"First 10 maxima values: {all_max_values[:10]}")
+
+    print(f"\nTotal minima found: {len(all_min_values)}")
+    if len(all_min_values) > 0:
+        print(f"Minima value range: {np.min(all_min_values):.2e} to {np.max(all_min_values):.2e}")
+        print(f"Minima mean: {np.mean(all_min_values):.2e}")
+        print(f"First 10 minima values: {all_min_values[:10]}")
+        print(f"Any negative minima? {np.any(all_min_values < 0)}")
+        print(f"Number of minima < 1e-10: {np.sum(all_min_values < 1e-10)}")
+
     # Convert to magnitudes
     # Ensure no zeros or negative values
     noise_floor = 1e-10
@@ -245,14 +265,36 @@ def calculate_contrast_curve_paper_method(image, pixel_scale=0.0135, min_radius=
 
     # Minima magnitudes
     if len(all_min_values) > 0:
-        all_min_values = np.maximum(all_min_values, noise_floor)
-        min_mags = -2.5 * np.log10(all_min_values / star_flux)
+        # Use absolute value of minima for magnitude calculation
+        # This treats the "depth" of valleys as a positive signal
+        min_values_abs = np.abs(all_min_values)
+        min_values_abs = np.maximum(min_values_abs, noise_floor)
+        min_mags = -2.5 * np.log10(min_values_abs / star_flux)
+
+        # Debug info for minima correction
+        print(f"\n=== Minima Correction (Absolute Value Method) ===")
+        print(f"Original minima range: {np.min(all_min_values):.2e} to {np.max(all_min_values):.2e}")
+        print(f"Absolute value range: {np.min(min_values_abs):.2e} to {np.max(min_values_abs):.2e}")
+        print(f"Expected magnitude range: {np.min(min_mags):.2f} to {np.max(min_mags):.2f}")
     else:
         min_mags = np.array([])
 
     # Detection limit magnitudes
     detection_limits = np.maximum(detection_limits, noise_floor)
     limit_mags = -2.5 * np.log10(detection_limits / star_flux)
+
+    # ===== NEW DEBUGGING INFO FOR MAGNITUDES =====
+    print(f"\n=== Magnitude Statistics ===")
+    if len(max_mags) > 0:
+        print(f"Maxima magnitude range: {np.min(max_mags):.2f} to {np.max(max_mags):.2f}")
+        print(f"First 10 maxima mags: {max_mags[:10]}")
+
+    if len(min_mags) > 0:
+        print(f"Minima magnitude range: {np.min(min_mags):.2f} to {np.max(min_mags):.2f}")
+        print(f"First 10 minima mags: {min_mags[:10]}")
+        print(f"Number of minima mags > 10: {np.sum(min_mags > 10)}")
+        print(f"Number of minima mags > 15: {np.sum(min_mags > 15)}")
+        print(f"Number of minima mags > 20: {np.sum(min_mags > 20)}")
 
     # Convert pixels to arcsec
     all_max_separations_arcsec = all_max_separations * pixel_scale
@@ -344,6 +386,14 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
     # Add title with target name
     fig.suptitle(f'{title} - {telescope_name} {telescope_diameter:.1f}m Telescope',
                  fontsize=14, fontweight='bold')
+
+    # ===== NEW DEBUGGING INFO FOR PLOTTING =====
+    print(f"\n=== Plotting Statistics ===")
+    print(f"Y-axis will be set to: 0 to {max(10, np.max(limits) + 0.5):.1f}")
+    if len(min_mags) > 0:
+        print(f"Minima mags that would be visible (< {max(10, np.max(limits) + 0.5):.1f}): "
+              f"{np.sum(min_mags < max(10, np.max(limits) + 0.5))}")
+        print(f"Minima mags that are off the plot: {np.sum(min_mags >= max(10, np.max(limits) + 0.5))}")
 
     # Plot local maxima (empty squares)
     ax.scatter(max_seps, max_mags, marker='s', s=30,
