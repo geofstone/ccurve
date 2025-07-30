@@ -399,15 +399,32 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
         # Convert to pixels for annotation
         peak_sep_pixels = peak_sep / results['pixel_scale']
 
+        # Dynamic positioning for peak annotation
+        x_range = np.max(radii) - np.min(radii)
+        y_range = np.max(limits) - np.min(limits)
+
+        # Position peak annotation in upper RIGHT area of plot
+        peak_annotation_x = peak_sep + 0.2 * x_range
+        peak_annotation_y = peak_limit + 0.3 * y_range
+
+        # Make sure annotation stays within plot bounds
+        peak_annotation_x = min(peak_annotation_x, np.max(radii) - 0.05 * x_range)
+        peak_annotation_y = min(peak_annotation_y, np.max(limits) + 0.4 * y_range)
+
+        # If peak is too close to the right edge, position annotation to the left
+        if peak_sep > 0.7 * np.max(radii):
+            peak_annotation_x = peak_sep - 0.2 * x_range
+            peak_annotation_x = max(peak_annotation_x, np.min(radii) + 0.05 * x_range)
+
         # Annotate the peak delta-magnitude point
         annotation_text = (f'Peak Δm:\n' +
                            f'Δm = {peak_limit:.1f} at {peak_sep:.2f}" ({peak_sep_pixels:.0f} pix)')
         ax.annotate(annotation_text,
                     xy=(peak_sep, peak_limit),
-                    xytext=(peak_sep - 0.15, peak_limit - 2.0),  # Move annotation farther away
+                    xytext=(peak_annotation_x, peak_annotation_y),
                     arrowprops=dict(arrowstyle='->', color='red', lw=1),
                     fontsize=10, ha='left',
-                    bbox=dict(boxstyle='round,pad=0.3', facecolor='lightblue', alpha=0.8))
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='lightblue', alpha=0.5))
 
     # Find and highlight detections (maxima below the limit)
     if len(max_seps) > 0:
@@ -432,6 +449,23 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
                 # Get the limiting magnitude at this separation
                 limiting_mag = np.interp(sep, radii, limits)
 
+                # Dynamic positioning for detection annotation
+                x_range = np.max(radii) - np.min(radii)
+                y_range = np.max(limits) - np.min(limits)
+
+                # Position detection annotation in upper LEFT area of plot
+                det_annotation_x = sep - 0.3 * x_range
+                det_annotation_y = mag + 0.4 * y_range
+
+                # Make sure annotation stays within plot bounds
+                det_annotation_x = max(det_annotation_x, np.min(radii) + 0.05 * x_range)
+                det_annotation_y = min(det_annotation_y, np.max(limits) + 0.4 * y_range)
+
+                # If detection is too close to the left edge, position annotation to the right
+                if sep < 0.3 * np.max(radii):
+                    det_annotation_x = sep + 0.2 * x_range
+                    det_annotation_x = min(det_annotation_x, np.max(radii) - 0.05 * x_range)
+
                 # Annotation text
                 sep_pixels = sep / results['pixel_scale']
                 annotation_text = (f'Δm = {mag:.2f}\n' +
@@ -439,10 +473,10 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
                                    f'Separation = {sep:.3f}" ({sep_pixels:.1f} pix)')
                 ax.annotate(annotation_text,
                             xy=(sep, mag),
-                            xytext=(sep + 0.15, mag + 1.5),  # Move annotation farther away
+                            xytext=(det_annotation_x, det_annotation_y),
                             arrowprops=dict(arrowstyle='->', color='black', lw=0.5),
                             fontsize=10, ha='left',
-                            bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7))
+                            bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.5))
 
     # Labels and formatting
     ax.set_xlabel('Separation [arcsec]', fontsize=13)
