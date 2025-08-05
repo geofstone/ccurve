@@ -1,8 +1,8 @@
 """
-Contrast Curve Generator - Simplified Robust Version
-===================================================
+Contrast Curve Generator - Simplified Robust Version with Smart Annotation Placement
+===================================================================================
 
-Back to basics with minimal filtering and robust statistics
+Back to basics with minimal filtering, robust statistics, and intelligent annotation positioning
 """
 
 import numpy as np
@@ -325,10 +325,387 @@ def measure_psf_fwhm(image, center):
     return fwhm_pixels
 
 
+def analyze_data_distribution(x_data_sets, y_data_sets, x_lims, y_lims):
+    """
+    Analyze the distribution of data points to understand where they cluster.
+
+    Returns:
+    - density_map: 2D array showing data density in different regions
+    - clear_regions: list of (region_name, score) sorted by clearness
+    """
+
+    # Combine all data points
+    all_x = np.array([])
+    all_y = np.array([])
+
+    for x_data, y_data in zip(x_data_sets, y_data_sets):
+        if len(x_data) > 0 and len(y_data) > 0:
+            all_x = np.concatenate([all_x, x_data])
+            all_y = np.concatenate([all_y, y_data])
+
+    if len(all_x) == 0:
+        # No data - return default
+        return np.zeros((4, 4)), [('top-left', 1.0)]
+
+    # Normalize data to 0-1 range
+    x_min, x_max = x_lims
+    y_min, y_max = y_lims
+    norm_x = (all_x - x_min) / (x_max - x_min)
+    norm_y = (all_y - y_min) / (y_max - y_min)
+
+    # Create density map (4x4 grid)
+    density_map = np.zeros((4, 4))
+
+    for x, y in zip(norm_x, norm_y):
+        if 0 <= x <= 1 and 0 <= y <= 1:
+            grid_x = min(3, int(x * 4))
+            grid_y = min(3, int((1-y) * 4))  # Flip y for top-bottom orientation
+            density_map[grid_y, grid_x] += 1
+
+    # Define regions with their grid positions
+    regions = {
+        'top-left': (0, 0),
+        'top-center': (0, 1),
+        'top-right': (0, 3),
+        'mid-left': (1, 0),
+        'mid-center': (1, 1),
+        'mid-right': (1, 3),
+        'bottom-left': (3, 0),
+        'bottom-center': (3, 1),
+        'bottom-right': (3, 3),
+        'upper-left': (0, 0),
+        'upper-right': (0, 2),
+        'lower-left': (2, 0),
+        'lower-right': (2, 2),
+    }
+
+    # Calculate clearness score for each region (lower density = higher score)
+    max_density = np.max(density_map) if np.max(density_map) > 0 else 1
+    clear_regions = []
+
+    for region_name, (gy, gx) in regions.items():
+        # Score is inverse of density, plus bonus for corner regions
+        density = density_map[gy, gx]
+        base_score = 1.0 - (density / max_density)
+
+        # Add bonus for corner positions (usually clearer)
+        if 'corner' in region_name or region_name in ['top-left', 'top-right', 'bottom-left', 'bottom-right']:
+            base_score += 0.2
+
+        clear_regions.append((region_name, base_score))
+
+    # Sort by score (highest first)
+    clear_regions.sort(key=lambda x: x[1], reverse=True)
+
+    return density_map, clear_regions
+
+
+def find_clear_annotation_area(ax, x_data_sets, y_data_sets, avoid_boxes=None, annotation_type="detection"):
+    """
+    Find a clear area for annotation placement using advanced spatial analysis.
+
+    Parameters:
+    - ax: matplotlib axis object
+    - x_data_sets, y_data_sets: lists of arrays of data points to avoid
+    - avoid_boxes: list of (x, y, width, height) regions to avoid in data coordinates
+    - annotation_type: "detection" or "info" for different sizing considerations
+
+    Returns:
+    - (x, y): coordinates for annotation placement in data coordinates
+    """
+
+    # Get axis limits
+    x_min, x_max = ax.get_xlim()
+    y_min, y_max = ax.get_ylim()
+
+    # Analyze data distribution
+    density_map, clear_regions = analyze_data_distribution(x_data_sets, y_data_sets, (x_min, x_max), (y_min, y_max))
+
+    # Define annotation box size based on type
+    if annotation_type == "detection":
+        box_width_rel = 0.2   # Smaller box for detection info
+        box_height_rel = 0.15
+    else:
+        box_width_rel = 0.25  # Larger box for general info
+        box_height_rel = 0.25
+
+    # Extended candidate positions with more granular options
+    candidate_positions = [
+        # Corners
+        (0.15, 0.85, 'upper-left'),
+        (0.85, 0.85, 'upper-right'),
+        (0.15, 0.15, 'lower-left'),
+        (0.85, 0.15, 'lower-right'),
+
+        # Edges (more positions)
+        (0.5, 0.9, 'top-center'),
+        (0.3, 0.9, 'top-left-center'),
+        (0.7, 0.9, 'top-right-center'),
+        (0.5, 0.1, 'bottom-center'),
+        (0.3, 0.1, 'bottom-left-center'),
+        (0.7, 0.1, 'bottom-right-center'),
+
+        # Side positions
+        (0.05, 0.7, 'left-upper'),
+        (0.05, 0.5, 'left-center'),
+        (0.05, 0.3, 'left-lower'),
+        (0.95, 0.7, 'right-upper'),
+        (0.95, 0.5, 'right-center'),
+        (0.95, 0.3, 'right-lower'),
+
+        # Interior positions (last resort)
+        (0.25, 0.75, 'inner-upper-left'),
+        (0.75, 0.75, 'inner-upper-right'),
+        (0.25, 0.25, 'inner-lower-left'),
+        (0.75, 0.25, 'inner-lower-right'),
+    ]
+
+    best_position = None
+    best_score = -1
+
+    for rel_x, rel_y, pos_name in candidate_positions:
+        # Convert to data coordinates
+        test_x = x_min + rel_x * (x_max - x_min)
+        test_y = y_min + rel_y * (y_max - y_min)
+
+        # Calculate annotation box bounds in data coordinates
+        box_width = box_width_rel * (x_max - x_min)
+        box_height = box_height_rel * (y_max - y_min)
+
+        # Adjust box position based on alignment
+        if rel_x < 0.5:  # Left side - box extends right
+            box_x_min = test_x
+            box_x_max = test_x + box_width
+        else:  # Right side - box extends left
+            box_x_min = test_x - box_width
+            box_x_max = test_x
+
+        if rel_y > 0.5:  # Upper side - box extends down
+            box_y_min = test_y - box_height
+            box_y_max = test_y
+        else:  # Lower side - box extends up
+            box_y_min = test_y
+            box_y_max = test_y + box_height
+
+        # Score this position
+        score = 0
+
+        # 1. Distance to data points (most important factor)
+        min_data_distance = 1.0
+        for x_data, y_data in zip(x_data_sets, y_data_sets):
+            if len(x_data) > 0 and len(y_data) > 0:
+                # Check if any data points fall within the annotation box
+                inside_box = ((x_data >= box_x_min) & (x_data <= box_x_max) &
+                             (y_data >= box_y_min) & (y_data <= box_y_max))
+
+                if np.any(inside_box):
+                    min_data_distance = 0  # Data inside box - bad score
+                    break
+
+                # Calculate minimum distance to box edges
+                # Distance to box center
+                box_center_x = (box_x_min + box_x_max) / 2
+                box_center_y = (box_y_min + box_y_max) / 2
+
+                # Normalize for fair comparison
+                norm_box_x = (box_center_x - x_min) / (x_max - x_min)
+                norm_box_y = (box_center_y - y_min) / (y_max - y_min)
+                norm_data_x = (x_data - x_min) / (x_max - x_min)
+                norm_data_y = (y_data - y_min) / (y_max - y_min)
+
+                distances = np.sqrt((norm_data_x - norm_box_x)**2 + (norm_data_y - norm_box_y)**2)
+                min_data_distance = min(min_data_distance, np.min(distances))
+
+        score += min_data_distance * 10  # Weight heavily
+
+        # 2. Check against avoid_boxes (other annotations)
+        box_conflict = False
+        if avoid_boxes:
+            for avoid_x, avoid_y, avoid_w, avoid_h in avoid_boxes:
+                # Check for overlap
+                if not (box_x_max < avoid_x or box_x_min > avoid_x + avoid_w or
+                        box_y_max < avoid_y or box_y_min > avoid_y + avoid_h):
+                    box_conflict = True
+                    break
+
+        if box_conflict:
+            score -= 5  # Heavy penalty for overlapping other annotations
+
+        # 3. Prefer edge positions over interior
+        edge_distance = min(rel_x, 1-rel_x, rel_y, 1-rel_y)
+        if edge_distance < 0.2:  # Close to edge
+            score += 1
+
+        # 4. Avoid extreme corners if data is sparse there
+        if rel_x < 0.1 or rel_x > 0.9 or rel_y < 0.1 or rel_y > 0.9:
+            score += 0.5  # Small bonus for corners
+
+        # 5. Penalize positions that would place box outside plot area
+        if (box_x_min < x_min or box_x_max > x_max or
+            box_y_min < y_min or box_y_max > y_max):
+            score -= 2
+
+        # Update best position
+        if score > best_score:
+            best_score = score
+            best_position = (test_x, test_y)
+
+    # If no good position found, use fallback
+    if best_position is None or best_score < 0:
+        best_position = (x_min + 0.85 * (x_max - x_min),
+                        y_min + 0.85 * (y_max - y_min))
+
+    return best_position
+
+
+def find_clear_info_box_position(ax, data_points, avoid_boxes=None):
+    """
+    Find the best position for the info box that avoids data and other annotations.
+
+    Returns position in transform coordinates (0-1 range) and alignment.
+    """
+
+    # Get axis limits
+    x_min, x_max = ax.get_xlim()
+    y_min, y_max = ax.get_ylim()
+
+    # Analyze data distribution first
+    x_data_sets = [dp[0] for dp in data_points]
+    y_data_sets = [dp[1] for dp in data_points]
+    density_map, clear_regions = analyze_data_distribution(x_data_sets, y_data_sets, (x_min, x_max), (y_min, y_max))
+
+    # Candidate positions for info box (in transform coordinates)
+    candidates = [
+        (0.02, 0.98, 'top-left', 'top', 'left'),
+        (0.02, 0.5, 'mid-left', 'center', 'left'),
+        (0.02, 0.02, 'bottom-left', 'bottom', 'left'),
+        (0.98, 0.98, 'top-right', 'top', 'right'),
+        (0.98, 0.5, 'mid-right', 'center', 'right'),
+        (0.98, 0.02, 'bottom-right', 'bottom', 'right'),
+        (0.5, 0.98, 'top-center', 'top', 'center'),
+        (0.5, 0.02, 'bottom-center', 'bottom', 'center'),
+    ]
+
+    best_score = -1
+    best_pos = (0.02, 0.98)  # Default to top-left
+    best_va = 'top'
+    best_ha = 'left'
+
+    # Info box dimensions in relative coordinates
+    info_box_width = 0.3
+    info_box_height = 0.35
+
+    for rel_x, rel_y, position_name, va, ha in candidates:
+
+        # Calculate info box bounds in data coordinates
+        if ha == 'left':
+            box_x_min = x_min + rel_x * (x_max - x_min)
+            box_x_max = box_x_min + info_box_width * (x_max - x_min)
+        elif ha == 'right':
+            box_x_max = x_min + rel_x * (x_max - x_min)
+            box_x_min = box_x_max - info_box_width * (x_max - x_min)
+        else:  # center
+            box_center_x = x_min + rel_x * (x_max - x_min)
+            box_x_min = box_center_x - info_box_width * (x_max - x_min) / 2
+            box_x_max = box_center_x + info_box_width * (x_max - x_min) / 2
+
+        if va == 'top':
+            box_y_max = y_min + rel_y * (y_max - y_min)
+            box_y_min = box_y_max - info_box_height * (y_max - y_min)
+        elif va == 'bottom':
+            box_y_min = y_min + rel_y * (y_max - y_min)
+            box_y_max = box_y_min + info_box_height * (y_max - y_min)
+        else:  # center
+            box_center_y = y_min + rel_y * (y_max - y_min)
+            box_y_min = box_center_y - info_box_height * (y_max - y_min) / 2
+            box_y_max = box_center_y + info_box_height * (y_max - y_min) / 2
+
+        # Calculate score
+        score = 0
+
+        # 1. Count data points inside the box area (heavily penalized)
+        points_inside = 0
+        for x_data, y_data in zip(x_data_sets, y_data_sets):
+            if len(x_data) > 0 and len(y_data) > 0:
+                inside = ((x_data >= box_x_min) & (x_data <= box_x_max) &
+                         (y_data >= box_y_min) & (y_data <= box_y_max))
+                points_inside += np.sum(inside)
+
+        score -= points_inside * 3  # Heavy penalty for each point inside
+
+        # 2. Calculate minimum distance to nearest data point
+        min_distance = 1.0
+        for x_data, y_data in zip(x_data_sets, y_data_sets):
+            if len(x_data) > 0 and len(y_data) > 0:
+                box_center_x = (box_x_min + box_x_max) / 2
+                box_center_y = (box_y_min + box_y_max) / 2
+
+                norm_box_x = (box_center_x - x_min) / (x_max - x_min)
+                norm_box_y = (box_center_y - y_min) / (y_max - y_min)
+                norm_data_x = (x_data - x_min) / (x_max - x_min)
+                norm_data_y = (y_data - y_min) / (y_max - y_min)
+
+                distances = np.sqrt((norm_data_x - norm_box_x)**2 + (norm_data_y - norm_box_y)**2)
+                min_distance = min(min_distance, np.min(distances))
+
+        score += min_distance * 5  # Reward distance from data
+
+        # 3. Check against avoid_boxes (other annotations)
+        if avoid_boxes:
+            for avoid_x, avoid_y, avoid_w, avoid_h in avoid_boxes:
+                # Check for overlap
+                if not (box_x_max < avoid_x or box_x_min > avoid_x + avoid_w or
+                        box_y_max < avoid_y or box_y_min > avoid_y + avoid_h):
+                    score -= 10  # Huge penalty for overlapping annotations
+
+        # 4. Prefer traditional positions
+        if position_name in ['top-left', 'top-right', 'bottom-left', 'bottom-right']:
+            score += 1
+
+        # 5. Ensure box stays within plot bounds
+        if (box_x_min >= x_min and box_x_max <= x_max and
+            box_y_min >= y_min and box_y_max <= y_max):
+            score += 2
+        else:
+            score -= 3  # Penalty for going outside bounds
+
+        # Update best position
+        if score > best_score:
+            best_score = score
+            best_pos = (rel_x, rel_y)
+            best_va = va
+            best_ha = ha
+
+    return best_pos, best_va, best_ha
+
+
+def estimate_annotation_box_size(text_content, fontsize=9):
+    """
+    Estimate the size of a text box in relative plot coordinates.
+
+    Returns:
+    - (width, height) in relative coordinates (0-1 range)
+    """
+
+    lines = text_content.split('\n')
+    num_lines = len(lines)
+    max_line_length = max(len(line) for line in lines) if lines else 0
+
+    # Rough estimates based on typical font metrics
+    char_width_rel = 0.008  # Approximate character width in relative coords
+    line_height_rel = 0.025  # Approximate line height in relative coords
+    padding_rel = 0.02  # Padding around text
+
+    width = max_line_length * char_width_rel + padding_rel
+    height = num_lines * line_height_rel + padding_rel
+
+    return width, height
+
+
 def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Hooker",
                              telescope_diameter=2.54, wavelength=617e-9, confidence_level=5.0,
                              save_path=None, show_plot=True, date_obs=None):
-    """Plot contrast curve with full annotations."""
+    """Plot contrast curve with smart annotation placement that avoids data."""
 
     # Close any existing figures to prevent data persistence
     plt.close('all')
@@ -366,13 +743,28 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
     ax.plot(radii, limits, 'r-', linewidth=2.5,
             label=f'{confidence_level}σ Detection Limit')
 
-    # Get plot limits for positioning annotations
-    x_min, x_max = ax.get_xlim()
+    # Set initial axis limits
+    if len(max_seps) > 0:
+        x_min, x_max = 0, max(np.max(max_seps), np.max(radii)) * 1.1
+    else:
+        x_min, x_max = 0, np.max(radii) * 1.1
+
     y_min, y_max = 0, max(10, np.max(limits) + 0.5)
-    x_range = x_max - x_min
-    y_range = y_max - y_min
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+
+    # Prepare data sets for smart annotation placement
+    x_data_sets = [max_seps, radii]
+    y_data_sets = [max_mags, limits]
+    if len(min_seps) > 0:
+        x_data_sets.append(min_seps)
+        y_data_sets.append(min_mags)
+
+    # Track annotation boxes to prevent overlaps
+    annotation_boxes = []  # (x, y, width, height) in data coordinates
 
     # Find and highlight detections (maxima below the limit)
+    detection_annotation_placed = False
     if len(max_seps) > 0:
         # Interpolate limit at maxima positions
         limit_at_max = np.interp(max_seps, radii, limits)
@@ -386,7 +778,7 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
                        label='Detections')
             print(f"\nFound {np.sum(detections)} detections below {confidence_level}σ limit")
 
-            # Annotate the brightest detection
+            # Annotate the brightest detection with smart positioning
             if len(det_mags) > 0:
                 brightest_idx = np.argmin(det_mags)
                 sep = det_seps[brightest_idx]
@@ -395,21 +787,43 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
                 # Get the limiting magnitude at this separation
                 limiting_mag = np.interp(sep, radii, limits)
 
-                # Position detection annotation in upper center area
-                det_annotation_x = (x_min + x_max) / 2  # Center horizontally
-                det_annotation_y = y_min + 0.85 * y_range  # Near top
+                # Find clear area for detection annotation (avoiding existing boxes)
+                annotation_pos = find_clear_annotation_area(ax, x_data_sets, y_data_sets,
+                                                          avoid_boxes=annotation_boxes,
+                                                          annotation_type="detection")
 
                 # Annotation text
                 sep_pixels = sep / results['pixel_scale']
                 annotation_text = (f'Δm = {mag:.2f}\n' +
-                                   f'Limiting Δm = {limiting_mag:.2f}\n' +
-                                   f'Separation = {sep:.3f}" ({sep_pixels:.1f} pix)')
+                                   f'Limit = {limiting_mag:.2f}\n' +
+                                   f'Sep = {sep:.3f}" ({sep_pixels:.1f} px)')
+
+                # Estimate annotation box size and add to avoid list
+                box_width, box_height = estimate_annotation_box_size(annotation_text, fontsize=9)
+                x_range = x_max - x_min
+                y_range = y_max - y_min
+                box_data_width = box_width * x_range
+                box_data_height = box_height * y_range
+
+                # Add buffer around the annotation
+                buffer = 0.02
+                annotation_boxes.append((
+                    annotation_pos[0] - box_data_width/2 - buffer*x_range,
+                    annotation_pos[1] - box_data_height/2 - buffer*y_range,
+                    box_data_width + 2*buffer*x_range,
+                    box_data_height + 2*buffer*y_range
+                ))
+
                 ax.annotate(annotation_text,
                             xy=(sep, mag),
-                            xytext=(det_annotation_x, det_annotation_y),
-                            arrowprops=dict(arrowstyle='->', color='black', lw=0.5),
-                            fontsize=10, ha='center',
-                            bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.5))
+                            xytext=annotation_pos,
+                            arrowprops=dict(arrowstyle='->', color='red', lw=1.0,
+                                          connectionstyle="arc3,rad=0.2"),
+                            fontsize=9, ha='center', va='center',
+                            bbox=dict(boxstyle='round,pad=0.4', facecolor='yellow',
+                                    edgecolor='red', alpha=0.9, linewidth=1))
+
+                detection_annotation_placed = True
 
     # Labels and formatting
     ax.set_xlabel('Separation [arcsec]', fontsize=13)
@@ -430,22 +844,18 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
     # Grid
     ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
 
-    # Set y-axis limits
-    ax.set_ylim(y_min, y_max)
-
     # Set tick parameters
     ax.tick_params(axis='both', which='major', labelsize=11)
     ax2.tick_params(axis='both', which='major', labelsize=11)
 
-    # Add information box
+    # Create info box with smart positioning that avoids detections
     info_text = []
     info_text.append(f'Target: {title}')
     info_text.append(f'Telescope: {telescope_name} {telescope_diameter:.2f}m')
     info_text.append(f'Wavelength: {wavelength * 1e9:.0f} nm')
     info_text.append(f'Pixel scale: {results["pixel_scale"]:.4f}"/pix ({results["pixel_scale"] * 1000:.1f} mas/pix)')
     info_text.append(f'PSF FWHM: {results["fwhm_arcsec"]:.3f}" ({results["fwhm_pixels"]:.1f} pix)')
-    info_text.append(
-        f'λ/D: {results["lambda_over_d"]:.3f}" ({results["lambda_over_d"] / results["pixel_scale"]:.1f} pix)')
+    info_text.append(f'λ/D: {results["lambda_over_d"]:.3f}" ({results["lambda_over_d"] / results["pixel_scale"]:.1f} pix)')
     info_text.append(f'Dynamic Range: {results["dynamic_range"]:.0f}:1')
     info_text.append(f'Confidence: {confidence_level}σ')
 
@@ -459,12 +869,21 @@ def plot_contrast_curve_full(results, title="Contrast Curve", telescope_name="Ho
         except:
             pass
 
-    # Create the text box
+    # Find best position for info box (avoiding detection annotations)
+    info_pos, va, ha = find_clear_info_box_position(ax, list(zip(x_data_sets, y_data_sets)),
+                                                   avoid_boxes=annotation_boxes)
+
+    # Create the info text box
     info_str = '\n'.join(info_text)
-    ax.text(0.02, 0.98, info_str, transform=ax.transAxes,
-            fontsize=9, verticalalignment='top', horizontalalignment='left',
-            bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
-                      edgecolor='gray', alpha=0.9))
+    info_box = ax.text(info_pos[0], info_pos[1], info_str, transform=ax.transAxes,
+                      fontsize=9, verticalalignment=va, horizontalalignment=ha,
+                      bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
+                                edgecolor='gray', alpha=0.95, linewidth=1))
+
+    # Add a subtle enhancement: if both annotations are present, make sure they don't visually compete
+    if detection_annotation_placed:
+        # Make the info box slightly more transparent to de-emphasize it
+        info_box.get_bbox_patch().set_alpha(0.85)
 
     # Use a white background
     ax.set_facecolor('white')
@@ -487,7 +906,7 @@ class FinalContrastCurveGUI:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Contrast Curve Generator")
+        self.root.title("Contrast Curve Generator - Smart Annotations")
         self.root.geometry("800x800")
 
         self.image = None
@@ -604,8 +1023,9 @@ class FinalContrastCurveGUI:
         main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(4, weight=1)
 
-        self.log_status("Contrast Curve Generator Ready")
+        self.log_status("Contrast Curve Generator Ready (Smart Annotations)")
         self.log_status("Method: median(maxima) + 5×avg(MAD_max, MAD_min)")
+        self.log_status("Annotations will automatically avoid data points")
 
     def log_status(self, message):
         """Add message to status area."""
@@ -675,7 +1095,7 @@ class FinalContrastCurveGUI:
             return
 
         try:
-            self.log_status("\nGenerating contrast curve...")
+            self.log_status("\nGenerating contrast curve with smart annotations...")
 
             # Close any existing figures to prevent data persistence
             plt.close('all')
@@ -719,7 +1139,7 @@ class FinalContrastCurveGUI:
                 date_obs=date_obs
             )
 
-            self.log_status("Contrast curve generated successfully")
+            self.log_status("Contrast curve generated with optimized annotation placement")
 
         except Exception as e:
             messagebox.showerror("Error", f"Failed to generate curve: {str(e)}")
